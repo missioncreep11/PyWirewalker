@@ -4,7 +4,7 @@ A configurable L0→L1→L2→L3 processing chain and diagnostic notebook for Wi
 RBR Concerto CTDs. Reference deployment: mooring **NOPP-Aleutians**, RBR Concerto³ S/N 213752,
 2025-07 → 2026-05, 2 Hz continuous (~52.8 M scans, max ~518 dbar).
 
-All deployment- and machine-specific settings live in **`config.yaml`** — no paths are
+All deployment- and machine-specific settings live in **`config.json`** — no paths are
 hardcoded. Point it at your `.rsk` and an output directory; the data and figures are not
 tracked in git.
 
@@ -16,17 +16,17 @@ conda env create -f environment.yml          # creates the `wirewalker` env
 conda activate wirewalker
 python -m ipykernel install --user --name wirewalker --display-name "Python (wirewalker)"
 
-# 2. configure: edit config.yaml -> rsk_file, output_dir, basename, lat/lon, atm pressure
+# 2. configure: edit config.json -> rsk_file, output_dir, basename, lat/lon, atm pressure
 #    (paths may use ~; or override with env vars WW_RSK / WW_OUTPUT_DIR)
 
 # 3. build the products  (L1 from the .rsk, then L2, L3 from the level below)
 python process_wirewalker.py --level all      # or --level 1 / 2 / 3
-python process_wirewalker.py --level all --config /path/to/other.yaml   # another deployment
+python process_wirewalker.py --level all --config /path/to/other.json   # another deployment
 
 # 4. explore: open wirewalker_ctd_plots.ipynb with the "Python (wirewalker)" kernel
 ```
 
-The script and notebook both read `config.yaml` (found beside the script / by walking up
+The script and notebook both read `config.json` (found beside the script / by walking up
 from the notebook's directory). Outputs (`L1/ L2/ L3/`, `*.nc`) go to `output_dir`; figures
 go to `figs/` in the repo. Both are gitignored.
 
@@ -107,9 +107,9 @@ Use `--config <file>` (or `$WW_CONFIG`) to process a different deployment.
 Create the `wirewalker` conda env from `environment.yml` (see **Quick start** above). In
 VS Code / Jupyter select the **Python (wirewalker)** kernel.
 
-### Configuration (`config.yaml`)
+### Configuration (`config.json`)
 
-All deployment- and machine-specific settings live in `config.yaml`:
+All deployment- and machine-specific settings live in `config.json`:
 
 - **paths** — `rsk_file`, `output_dir` (where `L1/ L2/ L3/` are written), `basename`
   (output filename prefix). May use `~`; override with `WW_RSK` / `WW_OUTPUT_DIR` env vars.

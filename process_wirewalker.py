@@ -41,29 +41,30 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import json
+
 import gsw
 import netCDF4
 import xarray as xr
-import yaml
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
 HERE = Path(__file__).resolve().parent
 
-# All deployment- and machine-specific settings live in a YAML config (config.yaml beside
+# All deployment- and machine-specific settings live in a JSON config (config.json beside
 # this script by default). Override the file with --config or $WW_CONFIG; override just the
 # data paths with $WW_RSK / $WW_OUTPUT_DIR. Module-level names below are populated from it.
 
 
 def load_config(path=None):
-    """Load the YAML configuration (explicit `path`, else $WW_CONFIG, else ./config.yaml)."""
-    p = Path(path or os.environ.get("WW_CONFIG") or HERE / "config.yaml").expanduser()
+    """Load the JSON configuration (explicit `path`, else $WW_CONFIG, else ./config.json)."""
+    p = Path(path or os.environ.get("WW_CONFIG") or HERE / "config.json").expanduser()
     if not p.exists():
         raise FileNotFoundError(
-            f"config not found: {p}\nCopy config.example.yaml to config.yaml and edit it.")
+            f"config not found: {p}\nEdit config.json with your deployment paths and metadata.")
     with open(p) as f:
-        return yaml.safe_load(f)
+        return json.load(f)
 
 
 def apply_config(cfg):
@@ -621,7 +622,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--level", choices=["1", "2", "3", "all"], required=True)
     ap.add_argument("--config", default=None,
-                    help="path to config.yaml (default: ./config.yaml or $WW_CONFIG)")
+                    help="path to config.json (default: ./config.json or $WW_CONFIG)")
     ap.add_argument("--max-casts", type=int, default=None,
                     help="process only the first N casts (for testing)")
     args = ap.parse_args()

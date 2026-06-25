@@ -11,7 +11,6 @@ dependencies:
   - netcdf4
   - gsw
   - cmocean
-  - pyyaml
   - ipykernel
   - jupyterlab
   - pip
