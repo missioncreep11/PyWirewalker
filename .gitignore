@@ -15,5 +15,8 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
+# Full plots notebook (kept local; use wirewalker_ctd_processing.ipynb)
+wirewalker_ctd_plots.ipynb
+
 # OS / editor
 .DS_Store
