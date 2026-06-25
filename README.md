@@ -1,7 +1,34 @@
-# NOPP-Aleutians Wirewalker RBR Concerto CTD processing
+# PyWirewalker — Wirewalker RBR Concerto CTD processing
 
-RBR Concerto³ S/N 213752, mooring **NOPP-Aleutians**, deployment 2025-07 → 2026-05.
-Sampling 2 Hz continuous, ~52.8 M scans, max pressure ~518 dbar.
+A configurable L0→L1→L2→L3 processing chain and diagnostic notebook for Wirewalker-mounted
+RBR Concerto CTDs. Reference deployment: mooring **NOPP-Aleutians**, RBR Concerto³ S/N 213752,
+2025-07 → 2026-05, 2 Hz continuous (~52.8 M scans, max ~518 dbar).
+
+All deployment- and machine-specific settings live in **`config.yaml`** — no paths are
+hardcoded. Point it at your `.rsk` and an output directory; the data and figures are not
+tracked in git.
+
+## Quick start
+
+```bash
+# 1. environment
+conda env create -f environment.yml          # creates the `wirewalker` env
+conda activate wirewalker
+python -m ipykernel install --user --name wirewalker --display-name "Python (wirewalker)"
+
+# 2. configure: edit config.yaml -> rsk_file, output_dir, basename, lat/lon, atm pressure
+#    (paths may use ~; or override with env vars WW_RSK / WW_OUTPUT_DIR)
+
+# 3. build the products  (L1 from the .rsk, then L2, L3 from the level below)
+python process_wirewalker.py --level all      # or --level 1 / 2 / 3
+python process_wirewalker.py --level all --config /path/to/other.yaml   # another deployment
+
+# 4. explore: open wirewalker_ctd_plots.ipynb with the "Python (wirewalker)" kernel
+```
+
+The script and notebook both read `config.yaml` (found beside the script / by walking up
+from the notebook's directory). Outputs (`L1/ L2/ L3/`, `*.nc`) go to `output_dir`; figures
+go to `figs/` in the repo. Both are gitignored.
 
 ## Archive levels
 
@@ -73,20 +100,23 @@ python3 process_wirewalker.py --level 1 --max-casts 50   # quick test subset
 
 Each level reads the product below it: `--level 2` reads the L1 NetCDF, `--level 3` reads
 L2; both error if the input is missing. L2 builds in ~13 s, L3 in ~2 s (no SQLite re-query).
+Use `--config <file>` (or `$WW_CONFIG`) to process a different deployment.
 
 ### Environment
 
-Dedicated conda env `wirewalker` (conda-forge):
+Create the `wirewalker` conda env from `environment.yml` (see **Quick start** above). In
+VS Code / Jupyter select the **Python (wirewalker)** kernel.
 
-```bash
-conda create -y -n wirewalker -c conda-forge \
-  python=3.12 numpy pandas scipy matplotlib xarray netcdf4 gsw cmocean ipykernel jupyterlab
-conda activate wirewalker
-pip install pyrsktools plotly        # RBR thermal-mass reference; interactive plots
-python -m ipykernel install --user --name wirewalker --display-name "Python (wirewalker)"
-```
+### Configuration (`config.yaml`)
 
-In VS Code / Jupyter, select the **Python (wirewalker)** kernel.
+All deployment- and machine-specific settings live in `config.yaml`:
+
+- **paths** — `rsk_file`, `output_dir` (where `L1/ L2/ L3/` are written), `basename`
+  (output filename prefix). May use `~`; override with `WW_RSK` / `WW_OUTPUT_DIR` env vars.
+- **metadata** — `mooring`, `instrument`, `latitude`, `longitude`,
+  `atmospheric_pressure_dbar`.
+- **processing** — `sampling_hz`, `thermal_mass` (α/β/γ), `grid` (L2/L3 bin sizes, gap-fill),
+  `n2_vertical_smoothing_m`, `gravity`.
 
 ## Plots
 

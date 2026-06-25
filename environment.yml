@@ -1,0 +1,21 @@
+name: wirewalker
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - xarray
+  - netcdf4
+  - gsw
+  - cmocean
+  - pyyaml
+  - ipykernel
+  - jupyterlab
+  - pip
+  - pip:
+      - pyrsktools   # RBR thermal-mass reference (correctTM defaults)
+      - plotly       # interactive notebook plots
+      - nbstripout   # strips notebook outputs on commit

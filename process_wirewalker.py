@@ -34,6 +34,7 @@ Author: NOPP-Aleutians processing
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import time as _time
 from dataclasses import dataclass
@@ -43,54 +44,61 @@ import numpy as np
 import gsw
 import netCDF4
 import xarray as xr
+import yaml
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
 HERE = Path(__file__).resolve().parent
-DATA_DIR = HERE.parent  # /Users/drew/NOPP/data
 
-RSK_PATH = DATA_DIR / "202605_NOPP-Aleutians_RBR-Concerto-Serial213752_DeploymentData.rsk"
+# All deployment- and machine-specific settings live in a YAML config (config.yaml beside
+# this script by default). Override the file with --config or $WW_CONFIG; override just the
+# data paths with $WW_RSK / $WW_OUTPUT_DIR. Module-level names below are populated from it.
 
-L1_PATH = HERE / "L1" / "NOPP-Aleutians_RBR-Concerto-213752_L1_converted.nc"
-L2_PATH = HERE / "L2" / "NOPP-Aleutians_RBR-Concerto-213752_L2_upcast_grid0.5m.nc"
-L3_PATH = HERE / "L3" / "NOPP-Aleutians_RBR-Concerto-213752_L3_grid1m_30min.nc"
-L3I_PATH = HERE / "L3" / "NOPP-Aleutians_RBR-Concerto-213752_L3_grid1m_30min_interp.nc"
 
-# Deployment metadata
-LAT = 49.5            # deg N
-LON = -159.0          # deg E (i.e. 159 W)
-ATM_DBAR = 10.1325    # atmospheric pressure offset (from rsk parameterKeys ATMOSPHERE)
-INSTRUMENT = "RBRconcerto3 S/N 213752"
-MOORING = "NOPP-Aleutians"
+def load_config(path=None):
+    """Load the YAML configuration (explicit `path`, else $WW_CONFIG, else ./config.yaml)."""
+    p = Path(path or os.environ.get("WW_CONFIG") or HERE / "config.yaml").expanduser()
+    if not p.exists():
+        raise FileNotFoundError(
+            f"config not found: {p}\nCopy config.example.yaml to config.yaml and edit it.")
+    with open(p) as f:
+        return yaml.safe_load(f)
 
-# L2 vertical grid (0.5 m bins, 0-500 m); max pressure in file is ~518 dbar
-GRID_DZ = 0.5
-GRID_ZMIN = 0.0
-GRID_ZMAX = 500.0
 
-# L3 regular depth x time grid: 1 m vertical, 30 min temporal.
-# Native upcast cadence ~31 min, so a 30-min grid is ~1 upcast/bin (Nyquist 1 cph).
-# Empty time bins (the few gaps) are left as NaN -- no temporal interpolation.
-L3_DZ = 1.0
-L3_DT = "30min"
-# Companion gap-filled L3: linearly interpolate empty time bins (whole NaN columns)
-# across gaps no longer than this many bins. Default 1 = fill only isolated single
-# missing 30-min bins (the ~31-min-cadence phase slip); never bridges real gaps.
-L3_INTERP_MAXGAP = 1
-# Buoyancy frequency N^2 = (g/rho0) d(sigma0)/dz: sigma0 is vertically smoothed with a
-# boxcar of this length before differentiating (chosen from the dsigma0/dz comparison).
-N2_SMOOTH_M = 5.0
-G_GRAV = 9.81
+def apply_config(cfg):
+    """Populate the module-level settings (paths, metadata, processing params) from `cfg`."""
+    g = globals()
+    g["CFG"] = cfg
+    # paths: env vars take precedence so the committed config need not be edited per machine
+    g["RSK_PATH"] = Path(os.environ.get("WW_RSK", cfg["rsk_file"])).expanduser()
+    g["OUTPUT_DIR"] = Path(os.environ.get("WW_OUTPUT_DIR", cfg["output_dir"])).expanduser()
+    base = cfg["basename"]
+    g["BASENAME"] = base
+    g["L1_PATH"] = g["OUTPUT_DIR"] / "L1" / f"{base}_L1_converted.nc"
+    g["L2_PATH"] = g["OUTPUT_DIR"] / "L2" / f"{base}_L2_upcast_grid0.5m.nc"
+    g["L3_PATH"] = g["OUTPUT_DIR"] / "L3" / f"{base}_L3_grid1m_30min.nc"
+    g["L3I_PATH"] = g["OUTPUT_DIR"] / "L3" / f"{base}_L3_grid1m_30min_interp.nc"
+    # deployment metadata
+    g["LAT"] = cfg["latitude"]; g["LON"] = cfg["longitude"]
+    g["ATM_DBAR"] = cfg["atmospheric_pressure_dbar"]
+    g["INSTRUMENT"] = cfg["instrument"]; g["MOORING"] = cfg["mooring"]
+    # processing params
+    gr = cfg.get("grid", {})
+    g["GRID_DZ"] = gr.get("l2_dz_m", 0.5)
+    g["GRID_ZMIN"] = gr.get("zmin_m", 0.0); g["GRID_ZMAX"] = gr.get("zmax_m", 500.0)
+    g["L3_DZ"] = gr.get("l3_dz_m", 1.0); g["L3_DT"] = gr.get("l3_dt", "30min")
+    g["L3_INTERP_MAXGAP"] = gr.get("l3_interp_max_gap_bins", 1)
+    g["N2_SMOOTH_M"] = cfg.get("n2_vertical_smoothing_m", 5.0)
+    g["G_GRAV"] = cfg.get("gravity", 9.81)
+    g["FS"] = cfg.get("sampling_hz", 2.0)
+    tm = cfg.get("thermal_mass", {})
+    g["TM_ALPHA"] = tm.get("alpha", 0.04)
+    g["TM_BETA"] = tm.get("beta_per_s", 0.1)
+    g["TM_GAMMA"] = tm.get("gamma", 1.0)
 
-# Sampling rate (continuous, 2 Hz) and conductivity-cell thermal-mass correction.
-# RBR pyRSKtools `correctTM` defaults (Lueck & Picklo 1990): alpha=0.04, beta=0.1 s^-1
-# (relaxation time tau = 1/beta = 10 s), gamma = dC/dT = 1.0 (conductivity in mS/cm).
-# C-T alignment is NOT applied: optimal C-T lag was found to be ~0 s for this logger.
-FS = 2.0
-TM_ALPHA = 0.04
-TM_BETA = 0.1
-TM_GAMMA = 1.0
+
+apply_config(load_config())
 
 # Mapping of stored `data` columns -> physical channels (from `channels` table)
 #   channel01 = cond19  Conductivity   mS/cm
@@ -151,14 +159,19 @@ def read_cast_data(con: sqlite3.Connection, cast: Cast) -> dict[str, np.ndarray]
 # --------------------------------------------------------------------------- #
 # TEOS-10 conversion
 # --------------------------------------------------------------------------- #
-def correct_thermal_mass(cond, temp, alpha=TM_ALPHA, beta=TM_BETA, gamma=TM_GAMMA, fs=FS):
+def correct_thermal_mass(cond, temp, alpha=None, beta=None, gamma=None, fs=None):
     """Conductivity cell thermal-mass correction (Lueck & Picklo 1990), RBR form.
 
     Matches RBR pyRSKtools `RSK.correctTM`. `cond` in mS/cm, `temp` in degC, evenly
     sampled at `fs` Hz. Returns corrected conductivity (mS/cm). The recursive term is
     a first-order IIR filter, evaluated here with scipy.signal.lfilter per cast.
+    Unset arguments fall back to the loaded config (TM_ALPHA/TM_BETA/TM_GAMMA/FS).
     """
     from scipy.signal import lfilter
+    alpha = TM_ALPHA if alpha is None else alpha
+    beta = TM_BETA if beta is None else beta
+    gamma = TM_GAMMA if gamma is None else gamma
+    fs = FS if fs is None else fs
     a = (4 * fs / 2) * (alpha / beta) / (1 + 4 * fs / 2 / beta)
     b = 1 - 2 * a / alpha
     dT = np.diff(temp, prepend=temp[0])
@@ -607,10 +620,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--level", choices=["1", "2", "3", "all"], required=True)
+    ap.add_argument("--config", default=None,
+                    help="path to config.yaml (default: ./config.yaml or $WW_CONFIG)")
     ap.add_argument("--max-casts", type=int, default=None,
                     help="process only the first N casts (for testing)")
     args = ap.parse_args()
 
+    if args.config:
+        apply_config(load_config(args.config))
+
+    print(f"[config] {MOORING} | rsk={RSK_PATH} | out={OUTPUT_DIR}")
     if args.level in ("1", "all"):
         build_L1(args.max_casts)
     if args.level in ("2", "all"):
