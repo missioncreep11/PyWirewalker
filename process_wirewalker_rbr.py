@@ -324,6 +324,7 @@ def build_L1(max_casts: int | None = None):
     # at L2 instead.
     base_vars = ["conductivity", "temperature", "pressure", "depth"]
 
+    L1_PATH.unlink(missing_ok=True)   # avoid EACCES if a stale reader still holds the old file
     nc = netCDF4.Dataset(L1_PATH, "w", format="NETCDF4")
     for k, v in global_attrs("L1").items():
         nc.setncattr(k, v)
@@ -521,6 +522,7 @@ def build_L2(max_casts: int | None = None):
                "conductivity_note": "thermal-mass-corrected; salinity derived from it"},
     )
     enc = {v: {"zlib": True, "complevel": 4} for v in ds.data_vars}
+    L2_PATH.unlink(missing_ok=True)   # avoid EACCES if a stale reader still holds the old file
     ds.to_netcdf(L2_PATH, encoding=enc)
     print(f"[L2] done: {ncast} upcasts x {nz} levels in {_time.time()-t0:.1f}s -> {L2_PATH}")
 
@@ -686,6 +688,7 @@ def build_L3():
                    **extra_attrs},
         )
         enc = {v: {"zlib": True, "complevel": 4} for v in ds.data_vars}
+        Path(path).unlink(missing_ok=True)   # avoid EACCES if a stale reader still holds the old file
         ds.to_netcdf(path, encoding=enc)
 
     # primary: no temporal interpolation
