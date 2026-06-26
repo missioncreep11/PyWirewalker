@@ -20,8 +20,8 @@ python -m ipykernel install --user --name wirewalker --display-name "Python (wir
 #    (paths may use ~; or override with env vars WW_RSK / WW_OUTPUT_DIR)
 
 # 3. build the products  (L1 from the .rsk, then L2, L3 from the level below)
-python process_wirewalker.py --level all      # or --level 1 / 2 / 3
-python process_wirewalker.py --level all --config /path/to/other.json   # another deployment
+python process_wirewalker_rbr.py --level all      # or --level 1 / 2 / 3
+python process_wirewalker_rbr.py --level all --config /path/to/other.json   # another deployment
 
 # 4. explore: open wirewalker_ctd_plots.ipynb with the "Python (wirewalker)" kernel
 ```
@@ -91,11 +91,11 @@ reads the **L1 NetCDF** (not the `.rsk`), so L2 can only inherit L1's channels.
 ## Rebuild
 
 ```bash
-python3 process_wirewalker.py --level all          # L1 -> L2 -> L3
-python3 process_wirewalker.py --level 1             # just L1 (from the .rsk)
-python3 process_wirewalker.py --level 2             # just L2 (requires L1)
-python3 process_wirewalker.py --level 3             # just L3 (requires L2)
-python3 process_wirewalker.py --level 1 --max-casts 50   # quick test subset
+python3 process_wirewalker_rbr.py --level all          # L1 -> L2 -> L3
+python3 process_wirewalker_rbr.py --level 1             # just L1 (from the .rsk)
+python3 process_wirewalker_rbr.py --level 2             # just L2 (requires L1)
+python3 process_wirewalker_rbr.py --level 3             # just L3 (requires L2)
+python3 process_wirewalker_rbr.py --level 1 --max-casts 50   # quick test subset
 ```
 
 Each level reads the product below it: `--level 2` reads the L1 NetCDF, `--level 3` reads
@@ -129,7 +129,7 @@ viewer (Plotly, drag-to-zoom in VS Code), and a single-isopycnal depth spectrum
 (spike removal → 30-day Welch PSD, 1/30 d–1 cph, with tidal/inertial reference lines).
 
 All static figures are written to `figs/`. The base folder holds only the notebook, the
-`process_wirewalker.py` script, the `L1/ L2/ L3/` data dirs, `figs/`, and this README.
+`process_wirewalker_rbr.py` script, the `L1/ L2/ L3/` data dirs, `figs/`, and this README.
 
 ### Derived product
 

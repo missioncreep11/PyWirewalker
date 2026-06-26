@@ -23,10 +23,10 @@ rather than re-detecting, so cast boundaries match the manufacturer tool.
 
 Usage
 -----
-    python3 process_wirewalker.py --level 1
-    python3 process_wirewalker.py --level 2
-    python3 process_wirewalker.py --level 1 --max-casts 50      # quick test
-    python3 process_wirewalker.py --level all
+    python3 process_wirewalker_rbr.py --level 1
+    python3 process_wirewalker_rbr.py --level 2
+    python3 process_wirewalker_rbr.py --level 1 --max-casts 50      # quick test
+    python3 process_wirewalker_rbr.py --level all
 
 Author: NOPP-Aleutians processing
 """
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import time as _time
 from dataclasses import dataclass
@@ -101,13 +102,73 @@ def apply_config(cfg):
 
 apply_config(load_config())
 
-# Mapping of stored `data` columns -> physical channels (from `channels` table)
-#   channel01 = cond19  Conductivity   mS/cm
-#   channel02 = temp14  Temperature    degC   (C-T cell thermistor -> used for salinity)
-#   channel03 = pres24  Pressure       dbar   (total, incl. atmosphere)
-#   channel09 = temp22  Temperature    degC   (extra thermistor)
-#   channel10 = temp10  Temperature    degC   (extra thermistor)
-DATA_COLS = ["tstamp", "channel01", "channel02", "channel03", "channel09", "channel10"]
+# The mapping of stored `data` columns (channel01, channel02, ...) to physical
+# channels is NOT hardcoded -- it varies by instrument/deployment. It is read from
+# the rsk `channels` + `instrumentChannels` tables at runtime (see discover_channels),
+# so any extra sensors (turbidity, chlorophyll, DO, PAR, irradiance, extra
+# thermistors, ...) are picked up automatically.
+
+
+def _slug(text: str) -> str:
+    """Filesystem/NetCDF-safe lower_snake_case name from a channel long name."""
+    s = re.sub(r"[^0-9a-zA-Z]+", "_", (text or "").strip().lower()).strip("_")
+    return s or "channel"
+
+
+def discover_channels(con: sqlite3.Connection) -> list[dict]:
+    """Discover the measured channels actually stored in the `data` table.
+
+    Joins `channels` to `instrumentChannels` to map each measured channel to its
+    `channelNN` column (NN = channelOrder), keeping only channels whose column is
+    physically present in `data` (derived channels and channels from other modules
+    are skipped). Conductivity, the C-T cell thermistor (temp14) and the measured
+    pressure get canonical names (`conductivity`/`temperature`/`pressure`) so the
+    TEOS-10 step downstream is instrument-independent; every other measured channel
+    is carried through under a name slugged from its long name (deduped).
+
+    Returns a list of dicts: {col, var, long_name, units, short}.
+    """
+    datacols = {r[1] for r in con.execute("PRAGMA table_info(data)").fetchall()}
+    rows = con.execute(
+        "SELECT ic.channelOrder, c.shortName, c.longNamePlainText, c.unitsPlainText "
+        "FROM channels c JOIN instrumentChannels ic ON ic.channelID = c.channelID "
+        "WHERE c.isMeasured = 1 ORDER BY ic.channelOrder"
+    ).fetchall()
+
+    chans: list[dict] = []
+    used: set[str] = set()
+    have = {"conductivity": False, "temperature": False, "pressure": False}
+    for order, short, longname, units in rows:
+        col = f"channel{int(order):02d}"
+        if col not in datacols:
+            continue  # measured channel not stored in this deployment's data table
+        short = (short or "").lower()
+        if short.startswith("cond") and not have["conductivity"]:
+            var = "conductivity"; have["conductivity"] = True
+        elif short == "temp14" and not have["temperature"]:
+            var = "temperature"; have["temperature"] = True
+        elif short.startswith("pres") and not have["pressure"]:
+            var = "pressure"; have["pressure"] = True
+        else:
+            base = _slug(longname or short); var = base; k = 2
+            while var in used or var in have:
+                var = f"{base}_{k}"; k += 1
+        used.add(var)
+        chans.append({"col": col, "var": var, "long_name": longname or short,
+                      "units": units or "", "short": short})
+
+    # Fallback: if there is no temp14, promote the first temperature channel.
+    if not have["temperature"]:
+        for ch in chans:
+            if ch["short"].startswith("temp"):
+                ch["var"] = "temperature"; have["temperature"] = True
+                break
+
+    missing = [k for k, v in have.items() if not v]
+    if missing:
+        raise ValueError(f"rsk is missing required CTD channel(s) {missing}; "
+                         f"found: {[c['short'] for c in chans]}")
+    return chans
 
 
 # --------------------------------------------------------------------------- #
@@ -139,22 +200,20 @@ def load_casts(con: sqlite3.Connection) -> list[Cast]:
     return casts
 
 
-def read_cast_data(con: sqlite3.Connection, cast: Cast) -> dict[str, np.ndarray]:
-    """Pull the raw samples for one cast as float64 arrays."""
-    q = (f"SELECT {', '.join(DATA_COLS)} FROM data "
+def read_cast_data(con: sqlite3.Connection, cast: Cast,
+                   chans: list[dict]) -> dict[str, np.ndarray]:
+    """Pull the raw samples for one cast as float64 arrays, keyed by channel var name."""
+    cols = ["tstamp"] + [ch["col"] for ch in chans]
+    q = (f"SELECT {', '.join(cols)} FROM data "
          f"WHERE tstamp >= ? AND tstamp < ? ORDER BY tstamp ASC")
     rows = con.execute(q, (cast.t1, cast.t2)).fetchall()
     if not rows:
         return {}
     arr = np.asarray(rows, dtype=np.float64)
-    return {
-        "tstamp": arr[:, 0].astype(np.int64),
-        "cond": arr[:, 1],     # mS/cm
-        "temp": arr[:, 2],     # degC  (temp14)
-        "pres": arr[:, 3],     # dbar  (total)
-        "temp22": arr[:, 4],
-        "temp10": arr[:, 5],
-    }
+    out = {"tstamp": arr[:, 0].astype(np.int64)}
+    for i, ch in enumerate(chans, start=1):
+        out[ch["var"]] = arr[:, i]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -225,9 +284,7 @@ def global_attrs(level: str) -> dict:
 
 VAR_META = {
     "conductivity":             ("S m-1?mS/cm", "sea_water_electrical_conductivity", "mS/cm"),
-    "temperature":              ("temp14", "sea_water_temperature", "degC"),
-    "temperature_2":            ("temp22", "sea_water_temperature", "degC"),
-    "temperature_3":            ("temp10", "sea_water_temperature", "degC"),
+    "temperature":              ("temp14 (C-T cell thermistor)", "sea_water_temperature", "degC"),
     "pressure":                 ("total pressure", "sea_water_pressure", "dbar"),
     "sea_pressure":             ("pressure - atmosphere", "sea_water_pressure_due_to_sea_water", "dbar"),
     "depth":                    ("depth, positive down", "depth", "m"),
@@ -249,15 +306,23 @@ def build_L1(max_casts: int | None = None):
     """
     L1_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(f"file:{RSK_PATH}?mode=ro", uri=True)
+    chans = discover_channels(con)
     casts = load_casts(con)
     if max_casts:
         casts = casts[:max_casts]
-    print(f"[L1] {len(casts)} casts to process -> {L1_PATH.name}")
 
-    # L1 is a minimal converted product: measured channels + depth + cast flags.
+    # Channels beyond the core C/T/P that are carried through verbatim at L1.
+    extra = [ch for ch in chans if ch["var"] not in ("conductivity", "temperature", "pressure")]
+    print(f"[L1] {len(casts)} casts to process -> {L1_PATH.name}")
+    print(f"[L1] {len(chans)} measured channels from {RSK_PATH.name}:")
+    for ch in chans:
+        tag = " (core CTD)" if ch["var"] in ("conductivity", "temperature", "pressure") else ""
+        print(f"       {ch['col']} -> {ch['var']:<28s} [{ch['units']}]  {ch['long_name']}{tag}")
+
+    # L1 is a minimal converted product: every measured channel + depth + cast flags.
     # All TEOS-10 derived quantities (salinity/CT/sigma0/sound speed) are produced
     # at L2 instead.
-    f32vars = ["conductivity", "temperature", "pressure", "depth"]
+    base_vars = ["conductivity", "temperature", "pressure", "depth"]
 
     nc = netCDF4.Dataset(L1_PATH, "w", format="NETCDF4")
     for k, v in global_attrs("L1").items():
@@ -270,7 +335,7 @@ def build_L1(max_casts: int | None = None):
     vtime.calendar = "standard"
 
     ncv = {}
-    for name in f32vars:
+    for name in base_vars:
         comment, std, units = VAR_META[name]
         var = nc.createVariable(name, "f4", ("time",), zlib=True, complevel=4,
                                 chunksizes=(65536,))
@@ -279,6 +344,13 @@ def build_L1(max_casts: int | None = None):
         if std:
             var.standard_name = std
         ncv[name] = var
+    for ch in extra:
+        var = nc.createVariable(ch["var"], "f4", ("time",), zlib=True, complevel=4,
+                                chunksizes=(65536,))
+        var.units = ch["units"]
+        var.comment = ch["long_name"]
+        var.rsk_channel = ch["short"]
+        ncv[ch["var"]] = var
 
     v_castn = nc.createVariable("cast_number", "i4", ("time",), zlib=True, complevel=4)
     v_castn.comment = "sequential cast index over the deployment (down + up)"
@@ -292,17 +364,19 @@ def build_L1(max_casts: int | None = None):
     pos = 0
     t0 = _time.time()
     for c in casts:
-        d = read_cast_data(con, c)
+        d = read_cast_data(con, c, chans)
         if not d:
             continue
         n = d["tstamp"].size
-        depth = -gsw.z_from_p(d["pres"] - ATM_DBAR, LAT)   # m, positive down
+        depth = -gsw.z_from_p(d["pressure"] - ATM_DBAR, LAT)   # m, positive down
         sl = slice(pos, pos + n)
         vtime[sl] = d["tstamp"]
-        ncv["conductivity"][sl] = d["cond"]
-        ncv["temperature"][sl] = d["temp"]
-        ncv["pressure"][sl] = d["pres"]
+        ncv["conductivity"][sl] = d["conductivity"]
+        ncv["temperature"][sl] = d["temperature"]
+        ncv["pressure"][sl] = d["pressure"]
         ncv["depth"][sl] = depth
+        for ch in extra:
+            ncv[ch["var"]][sl] = d[ch["var"]]
         v_castn[sl] = c.cast_number
         v_profn[sl] = c.profile_number
         v_dir[sl] = c.direction
@@ -324,11 +398,12 @@ def build_L1(max_casts: int | None = None):
 def build_L2(max_casts: int | None = None):
     """Bin-average every UPCAST from L1 onto the 0.5 m depth grid -> NetCDF (depth, cast).
 
-    L2 is derived from the L1 product (NOT the raw .rsk), so it inherits only L1's
-    channels: conductivity, temperature, pressure and depth, plus the cast flags.
-    The extra thermistors and sea pressure are therefore absent by construction.
-    The conductivity thermal-mass correction is applied per upcast before deriving
-    salinity; the TEOS-10 quantities are computed here.
+    L2 is derived from the L1 product (NOT the raw .rsk), so it inherits L1's
+    channels: core conductivity/temperature/pressure plus any extra measured
+    sensors (turbidity, chlorophyll, DO, PAR, irradiance, extra thermistors, ...),
+    which are bin-averaged raw. The conductivity thermal-mass correction is applied
+    per upcast before deriving salinity; the TEOS-10 quantities are computed here.
+    Sea pressure is absent by construction (L1 stores total pressure only).
     """
     if not L1_PATH.exists():
         raise FileNotFoundError(
@@ -343,6 +418,14 @@ def build_L2(max_casts: int | None = None):
     cd_all = l1["cast_direction"].values
     pn_all = l1["profile_number"].values
     tms_all = l1["time"].values.astype("datetime64[ms]").astype(np.int64)  # ms since epoch
+    # Extra measured channels carried from L1 (everything that isn't core C/T/P,
+    # depth, or a cast flag). Gridded raw, alongside the TEOS-10 quantities.
+    _core = {"conductivity", "temperature", "pressure", "depth",
+             "cast_number", "profile_number", "cast_direction"}
+    extra_vars = [v for v in l1.data_vars if v not in _core]
+    extra_all = {v: l1[v].values for v in extra_vars}
+    extra_meta = {v: (l1[v].attrs.get("comment", ""), None, l1[v].attrs.get("units", ""))
+                  for v in extra_vars}
     l1.close()
 
     # Each cast is a contiguous block of equal cast_number (L1 is time-ordered).
@@ -361,7 +444,7 @@ def build_L2(max_casts: int | None = None):
 
     gridvars = ["conductivity", "temperature", "practical_salinity",
                 "absolute_salinity", "conservative_temperature", "sigma0",
-                "sound_speed"]
+                "sound_speed"] + extra_vars
     grids = {k: np.full((nz, ncast), np.nan, np.float32) for k in gridvars}
     nobs = np.zeros((nz, ncast), np.int32)
     ptime = np.full(ncast, np.nan)          # ms, mean sample time
@@ -382,6 +465,8 @@ def build_L2(max_casts: int | None = None):
             "conservative_temperature": der["conservative_temperature"],
             "sigma0": der["sigma0"], "sound_speed": der["sound_speed"],
         }
+        for v in extra_vars:
+            col[v] = extra_all[v][s:e]
         ib = np.digitize(depth, edges) - 1            # bin index per sample
         valid = (ib >= 0) & (ib < nz) & np.isfinite(depth)
         ibv = ib[valid]
@@ -403,7 +488,7 @@ def build_L2(max_casts: int | None = None):
     # Assemble xarray dataset
     data_vars = {}
     for k in gridvars:
-        comment, std, units = VAR_META[k]
+        comment, std, units = VAR_META.get(k, extra_meta.get(k, ("", None, "")))
         attrs = {"units": units, "comment": comment}
         if std:
             attrs["standard_name"] = std
@@ -511,9 +596,12 @@ def build_L3():
     L3_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     l2 = xr.open_dataset(L2_PATH)
-    gridvars = ["conductivity", "temperature", "practical_salinity",
-                "absolute_salinity", "conservative_temperature", "sigma0",
-                "sound_speed"]
+    # Grid every L2 variable except the per-bin sample count (extra sensor channels
+    # carried from L1/L2 are included automatically).
+    gridvars = [v for v in l2.data_vars if v != "n_obs"]
+    l2meta = {v: (l2[v].attrs.get("comment", ""),
+                  l2[v].attrs.get("standard_name"),
+                  l2[v].attrs.get("units", "")) for v in gridvars}
     ncast = l2.sizes["cast"]
     nz2 = l2.sizes["depth"]
     assert nz2 % 2 == 0, "expected an even number of 0.5 m bins"
@@ -566,7 +654,7 @@ def build_L3():
     def _write(path, gr, extra_attrs):
         data_vars = {}
         for k in gridvars:
-            comment, std, units = VAR_META[k]
+            comment, std, units = VAR_META.get(k, l2meta.get(k, ("", None, "")))
             attrs = {"units": units, "comment": comment}
             if std:
                 attrs["standard_name"] = std
