@@ -77,20 +77,22 @@ def apply_config(cfg):
     g["OUTPUT_DIR"] = Path(os.environ.get("WW_OUTPUT_DIR", cfg["output_dir"])).expanduser()
     base = cfg["basename"]
     g["BASENAME"] = base
-    g["L1_PATH"] = g["OUTPUT_DIR"] / "L1" / f"{base}_L1_converted.nc"
-    g["L2_PATH"] = g["OUTPUT_DIR"] / "L2" / f"{base}_L2_upcast_grid0.5m.nc"
-    g["L3_PATH"] = g["OUTPUT_DIR"] / "L3" / f"{base}_L3_grid1m_30min.nc"
-    g["L3I_PATH"] = g["OUTPUT_DIR"] / "L3" / f"{base}_L3_grid1m_30min_interp.nc"
-    # deployment metadata
-    g["LAT"] = cfg["latitude"]; g["LON"] = cfg["longitude"]
-    g["ATM_DBAR"] = cfg["atmospheric_pressure_dbar"]
-    g["INSTRUMENT"] = cfg["instrument"]; g["MOORING"] = cfg["mooring"]
-    # processing params
+    # grid params first -- the bin sizes are encoded into the product filenames
     gr = cfg.get("grid", {})
     g["GRID_DZ"] = gr.get("l2_dz_m", 0.5)
     g["GRID_ZMIN"] = gr.get("zmin_m", 0.0); g["GRID_ZMAX"] = gr.get("zmax_m", 500.0)
     g["L3_DZ"] = gr.get("l3_dz_m", 1.0); g["L3_DT"] = gr.get("l3_dt", "30min")
     g["L3_INTERP_MAXGAP"] = gr.get("l3_interp_max_gap_bins", 1)
+    # product paths -- grid sizes go in the names so they track config (e.g. _grid1m_45min)
+    g["L1_PATH"] = g["OUTPUT_DIR"] / "L1" / f"{base}_L1_converted.nc"
+    g["L2_PATH"] = g["OUTPUT_DIR"] / "L2" / f"{base}_L2_upcast_grid{g['GRID_DZ']:g}m.nc"
+    _l3name = f"{base}_L3_grid{g['L3_DZ']:g}m_{g['L3_DT']}"
+    g["L3_PATH"] = g["OUTPUT_DIR"] / "L3" / f"{_l3name}.nc"
+    g["L3I_PATH"] = g["OUTPUT_DIR"] / "L3" / f"{_l3name}_interp.nc"
+    # deployment metadata
+    g["LAT"] = cfg["latitude"]; g["LON"] = cfg["longitude"]
+    g["ATM_DBAR"] = cfg["atmospheric_pressure_dbar"]
+    g["INSTRUMENT"] = cfg["instrument"]; g["MOORING"] = cfg["mooring"]
     g["N2_SMOOTH_M"] = cfg.get("n2_vertical_smoothing_m", 5.0)
     g["G_GRAV"] = cfg.get("gravity", 9.81)
     g["FS"] = cfg.get("sampling_hz", 2.0)

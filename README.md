@@ -45,16 +45,26 @@ reads the **L1 NetCDF** (not the `.rsk`), so L2 can only inherit L1's channels.
 
 ### Variables
 
-- **L1**: `conductivity` (mS/cm), `temperature` (°C, `temp14` C-T cell thermistor),
-  `pressure` (dbar, total), `depth` (m) + flags `cast_number`, `profile_number`,
-  `cast_direction`. *Raw* conductivity (no thermal-mass correction at L1). The extra
-  thermistors (`temp22`, `temp10`) and all derived salinities/density are **not** kept.
+The measured channels are **discovered from the `.rsk`** (the `channels` +
+`instrumentChannels` tables), not hardcoded, so any deployment's extra sensors are
+carried through automatically. Conductivity, the `temp14` C-T cell thermistor and
+the measured pressure get the canonical names below (for the TEOS-10 step); every
+other measured channel is passed through under a name slugged from its long name
+(e.g. `backscatter`, `chlorophyll`, `rhodamine`, `dissolved_o2_concentration`,
+`irradiance`/`irradiance_2`/…, `par`, a second thermistor `temperature_2`).
+
+- **L1**: core `conductivity` (mS/cm), `temperature` (°C, `temp14`), `pressure`
+  (dbar, total), `depth` (m) + **all other measured channels** (verbatim, with their
+  `.rsk` units) + flags `cast_number`, `profile_number`, `cast_direction`. *Raw*
+  conductivity (no thermal-mass correction at L1); derived salinities/density are
+  produced at L2.
 - **L2**: `conductivity` (thermal-mass corrected), `temperature`, `practical_salinity`,
-  `absolute_salinity`, `conservative_temperature`, `sigma0`, `sound_speed`, `n_obs`.
-  No extra thermistors and no sea-pressure (absent by construction, since L2 comes from L1).
+  `absolute_salinity`, `conservative_temperature`, `sigma0`, `sound_speed`, the extra
+  measured channels (bin-averaged raw), and `n_obs`. Sea pressure is absent by
+  construction (L1 stores total pressure only).
 - **L3**: same variables as L2 (minus `n_obs`) on a regular `(depth, time)` grid, plus
   `buoyancy_frequency_squared` (N², s⁻²) and `n_casts` = number of upcasts averaged into
-  each 30-min time bin.
+  each time bin.
 
 ## Processing notes
 
