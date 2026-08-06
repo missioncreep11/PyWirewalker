@@ -20,16 +20,46 @@ by Nortek's *Signature Deployment* software (which converts the raw `.ad2cp`).
 "Ingestion" below). Output is a depth × time grid of ENU velocity, shear,
 backscatter, and (HR mode) turbulent dissipation.
 
-## Ingestion — read `.ad2cp` directly with DOLfYN
+## Ingestion — read `.ad2cp` directly with DOLfYN (via MHKiT)
 
 The port does **not** depend on the Nortek Signature Deployment MATLAB export.
-Instead it ingests the raw binary `.ad2cp` files directly using
-[**DOLfYN**](https://dolfyn.readthedocs.io/) (`pip install dolfyn`), the
+Instead it ingests the raw binary `.ad2cp` files directly using **DOLfYN**, the
 industry-standard open-source library for reading and processing binary Nortek
 and TRDI ADCP/ADV files. DOLfYN natively parses `.ad2cp`, handles the burst /
 IBurstHR record layouts, and returns an **`xarray.Dataset`** — so it slots
 straight into the PyWirewalker stack (numpy/xarray/gsw/scipy) and the rest of the
 pipeline operates on xarray from the first stage.
+
+**Use DOLfYN from MHKiT, not the standalone package.** The standalone
+`dolfyn` on PyPI (`lkilcher/dolfyn`) is frozen at 1.3.0 and unmaintained — it
+imports `scipy.integrate.cumtrapz` (removed in scipy ≥1.14) and `pkg_resources`
+(needs `setuptools<81`), so it won't import on a modern stack without shims
+(upstream issues [#129](https://github.com/lkilcher/dolfyn/issues/129),
+[#133](https://github.com/lkilcher/dolfyn/issues/133)). Active development moved
+to [**MHKiT**](https://github.com/MHKiT-Software/MHKiT-Python): `pip install
+mhkit`, then `from mhkit import dolfyn`. This version imports cleanly on
+numpy 2 / scipy 1.17+. `environment.yml` depends on `mhkit`.
+
+### Spike results (verified, `mhkit` dolfyn 1.1.0)
+
+Read of a sample Signature1000 `.ad2cp` (`S100430A002_M3_d2-004.ad2cp`) returns a
+single `xarray.Dataset`. Confirmed against a subset read:
+
+| Need | DOLfYN gives | Status |
+|---|---|---|
+| beam velocity / amp / corr | `vel`(dir,range,time), `amp`/`corr`(beam,range,time) | ✅ |
+| attitude / IMU | `heading`,`pitch`,`roll`, `accel`,`angrt`,`mag` (dirIMU,time), `orientmat`(earth,inst,time) | ✅ |
+| beam→inst matrix | `beam2inst_orientmat` (4×4, read from file) | ✅ no hardcoded θ needed |
+| HR-mode turbulence | **`vel_b5`/`amp_b5`/`corr_b5`** on `range_b5` (0.1 m cells), own `time_b5`, `ambig_vel_b5` | ✅ IBurstHR beam-5 loads |
+| time | `datetime64[ns]` | ✅ no datenum math |
+| config | attrs: `beam_angle=25`, `cell_size`, `blank_dist`, `fs`, `n_cells`, `ambig_vel`, `coord_sys='beam'` | ✅ auto-populates most `variables.*` |
+| beam→ENU rotation | `dolfyn.rotate2(ds,'earth')` → `dir=['E','N','U1','U2']`, finite | ✅ full AHRS chain works |
+
+Notes: `rotate2` is **in-place** in this version (returns `None`; pass
+`inplace=False`). There are **two time bases** (`time`, `time_b5`) and **two range
+grids** — the HR stream is sampled independently and must be aligned in the
+turbulence stage. DOLfYN builds a full-file `.index` cache on first read (≈182 MB
+for a 2.9 GB file; the WW files are 35–38 GB, so cache the raw ingest).
 
 What this changes vs. the MATLAB reference:
 
@@ -139,11 +169,16 @@ adcp:
 
 ## Suggested port order
 
-0. **Ingestion spike**: `dolfyn.read()` on a sample `.ad2cp`; map DOLfYN
-   variable/coord names → what the rest of the pipeline needs; confirm IBurstHR
-   (turbulence) records load.
-1. `transforms.py` (`GetUnitVectors`, `Beam2XYZ/ENU`, `XYZ2ENU`) + unit tests
-   against MATLAB outputs on a saved sample; cross-check vs `dolfyn.rotate2`.
+0. **Ingestion spike** ✅ **DONE** — `from mhkit import dolfyn; dolfyn.read()` on a
+   sample `.ad2cp`; DOLfYN schema mapped and IBurstHR (beam-5) turbulence records
+   confirmed loading. See "Spike results" above.
+1. `transforms.py` — **`Beam2XYZ`/`XYZ2ENU`/`Beam2ENU` ported** (`ww_adcp/transforms.py`)
+   and **cross-checked vs `dolfyn.rotate2('earth')`** on a real `.ad2cp`: E/N/U agree
+   to corr > 0.9999, RMS diff ~1 mm/s (vs ~10-40 cm/s signal), even at large tilt;
+   no axis swap. Conclusion: the toolbox Euler rotation and DOLfYN's AHRS-orientmat
+   rotation are equivalent — the port can **use `dolfyn.rotate2`** (AHRS-based, more
+   accurate at extreme tilt) and keep `ww_adcp.transforms` as a validated fallback /
+   cross-check. Still TODO: `GetUnitVectors` (beam unit vectors for per-ping depth).
 2. Loaders on the DOLfYN Dataset: cast split / stitch (sort + merge are now DOLfYN).
 3. `motion_correction.py` (`WWcorr_beam`).
 4. `velocity.py` (`WWvel_upward`) — validate a gridded profile against MATLAB.
