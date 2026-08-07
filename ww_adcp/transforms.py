@@ -74,6 +74,31 @@ def beam2enu(beam, heading, pitch, roll, theta_deg: float = BEAM_ANGLE_DEG) -> n
     return np.einsum("nik,kcn->icn", RT, beam)     # (3, ncell, nping)
 
 
+def get_unit_vectors(phi, azi, pitch, roll):
+    """Beam unit-vector components (bX, bY, bZ) vs attitude (MATLAB ``GetUnitVectors``).
+
+    Port of Jody Klymak's ``GetUnitVectors`` (pitch applied first, then roll).
+    ``phi`` (beam elevation from horizontal, +up) and ``azi`` (azimuth) are scalars
+    in **radians**; ``pitch`` and ``roll`` are array-like (nping,) in **radians**.
+    Returns three (nping,) arrays.
+
+    CAUTION: ``WWvel_upward`` calls this as ``GetUnitVectors(phi, azi, roll, pitch)``
+    — i.e. it passes roll into this function's ``pitch`` slot and vice-versa. Callers
+    reproducing the toolbox must swap accordingly (see ``geometry.cell_depths``).
+    """
+    pitch = np.asarray(pitch, float)
+    roll = np.asarray(roll, float)
+    cPhi, sPhi = np.cos(phi), np.sin(phi)
+    cAzi, sAzi = np.cos(azi), np.sin(azi)
+    cPitch, sPitch = np.cos(pitch), np.sin(pitch)
+    cRoll, sRoll = np.cos(roll), np.sin(roll)
+
+    bX = cRoll * cAzi * cPhi - sRoll * sPhi
+    bY = -sRoll * sPitch * cAzi * cPhi + cPitch * sAzi * cPhi - cRoll * sPitch * sPhi
+    bZ = sRoll * cPitch * cAzi * cPhi + sPitch * sAzi * cPhi + cPitch * cRoll * sPhi
+    return bX, bY, bZ
+
+
 def xyz2enu(xyz, heading, pitch, roll) -> np.ndarray:
     """Instrument XYZ velocity -> ENU (MATLAB ``XYZ2ENU``).
 

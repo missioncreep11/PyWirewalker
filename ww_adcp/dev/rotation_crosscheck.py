@@ -6,7 +6,9 @@ sys.path.insert(0, "/Users/drew/PyWirewalker")
 from ww_adcp.transforms import beam2enu
 from mhkit import dolfyn
 
-FN = sys.argv[1] if len(sys.argv) > 1 else "/Users/drew/Downloads/S100430A002_M3_d2-004.ad2cp"
+_HERE = __import__("pathlib").Path(__file__).resolve()
+_DEFAULT = _HERE.parents[1] / "test_data" / "S100601A020_mbob2_ww3-002.ad2cp"
+FN = sys.argv[1] if len(sys.argv) > 1 else str(_DEFAULT)
 NENS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
 warnings.simplefilter("ignore")
 

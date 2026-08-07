@@ -178,7 +178,12 @@ adcp:
    no axis swap. Conclusion: the toolbox Euler rotation and DOLfYN's AHRS-orientmat
    rotation are equivalent — the port can **use `dolfyn.rotate2`** (AHRS-based, more
    accurate at extreme tilt) and keep `ww_adcp.transforms` as a validated fallback /
-   cross-check. Still TODO: `GetUnitVectors` (beam unit vectors for per-ping depth).
+   cross-check. **`GetUnitVectors` + per-ping depth geometry ported** too
+   (`ww_adcp/geometry.py`: `beam_ranges`, `cell_depths` giving `z = -pressure +
+   range*bZ`). Validated: `beam_ranges` matches DOLfYN's `range` coord to 1e-15 m,
+   and `cell_depths` behaves correctly on a synthetic upright ping; the all-4-beams-up
+   mask rejects a non-nominal (moored, heavily tilted) sample as expected. TODO:
+   exercise `cell_depths` on a real upward-looking WW `.ad2cp` (the 35-38 GB files).
 2. Loaders on the DOLfYN Dataset: cast split / stitch (sort + merge are now DOLfYN).
 3. `motion_correction.py` (`WWcorr_beam`).
 4. `velocity.py` (`WWvel_upward`) — validate a gridded profile against MATLAB.
