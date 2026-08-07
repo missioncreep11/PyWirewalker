@@ -99,12 +99,15 @@ def get_unit_vectors(phi, azi, pitch, roll):
     return bX, bY, bZ
 
 
-def xyz2enu(xyz, heading, pitch, roll) -> np.ndarray:
+def xyz2enu(xyz, heading, pitch, roll, reverse: bool = False) -> np.ndarray:
     """Instrument XYZ velocity -> ENU (MATLAB ``XYZ2ENU``).
 
     xyz : (3, ncell, nping). heading/pitch/roll: (nping,) degrees.
-    Returns (3, ncell, nping).
+    Returns (3, ncell, nping). With ``reverse=True`` apply the inverse rotation
+    (ENU -> XYZ, MATLAB ``XYZ2ENU(...,'reverse')``): input is then an ENU vector.
     """
     xyz = np.asarray(xyz, float)
     R = _tilt_heading_matrix(heading, pitch, roll)  # (nping, 3, 3)
+    if reverse:
+        return np.einsum("nji,jcn->icn", R, xyz)   # R^T @ v  (orthonormal inverse)
     return np.einsum("nij,jcn->icn", R, xyz)

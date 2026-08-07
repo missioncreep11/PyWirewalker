@@ -18,6 +18,7 @@ import numpy as np
 
 from .transforms import beam2enu
 from .geometry import cell_depths
+from .motion import beam_motion_correction
 
 
 def output_grid(boxsize: float, z_max: float) -> np.ndarray:
@@ -36,7 +37,8 @@ def _nominal_depth_grid(pressure, n_cells, cell_size, blank_dist, direction):
 
 
 def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
-                 min_bin_samples=10, cell_size=None, blank_dist=None, beam_angle=None):
+                 min_bin_samples=10, cell_size=None, blank_dist=None, beam_angle=None,
+                 motion_correct=True):
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
     Returns dict with keys velE, velN, velU, amp, corr_mean, n_obs (each (nz,)),
@@ -79,6 +81,13 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
             zc, v = zc[ok], v[ok]
             o = np.argsort(zc)
             eq_vel[b, :, n] = np.interp(tgt, zc[o], v[o], left=np.nan, right=np.nan)
+
+    # 3b. platform-motion correction: add the platform's along-beam velocity
+    if motion_correct and "accel" in dsc:
+        ts = dsc["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
+        corr_beam, _ = beam_motion_correction(
+            ts, press, dsc["accel"].values, pitch, roll, head, float(a["fs"]), beam_angle=ba)
+        eq_vel = eq_vel + corr_beam[:, None, :]                    # broadcast over cells
 
     # 4. beam -> ENU on the depth-aligned velocities
     enu = beam2enu(eq_vel, head, pitch, roll, theta_deg=ba)        # (3, ncell, nping)
