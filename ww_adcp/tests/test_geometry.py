@@ -35,9 +35,18 @@ def test_cell_depths_zero_tilt():
         np.testing.assert_allclose(z[1, :, b], -20.0 + num, atol=1e-9)
 
 
-def test_cell_depths_downward_beams_are_nan():
-    # A beam pointing down (phi negative) has bZ<0 -> ping masked to NaN.
+def test_cell_depths_downward_beams_are_kept():
+    # A downward-looking instrument (phi negative) has bZ<0 but is valid: cells sit
+    # BELOW the transducer, so z = -pressure + range*bZ goes deeper (more negative).
     z, ranges, bZ = cell_depths(np.array([5.0]), np.zeros(1), np.zeros(1),
-                                n_cells=3, cellsize=0.5, blockdis=0.5,
-                                phi_deg=-65.0)
+                                n_cells=3, cellsize=0.5, blockdis=0.5, phi_deg=-65.0)
+    assert np.all(np.isfinite(z))
+    assert np.all(bZ < 0)
+    assert np.all(np.diff(z[0, :, 0]) < 0)          # deeper with range
+
+
+def test_cell_depths_horizontal_beams_are_nan():
+    # Near-horizontal beams (phi ~ 0 -> |bZ| < bz_min) can't reference depth -> NaN.
+    z, ranges, bZ = cell_depths(np.array([5.0]), np.zeros(1), np.zeros(1),
+                                n_cells=3, cellsize=0.5, blockdis=0.5, phi_deg=0.0)
     assert np.all(np.isnan(z))
