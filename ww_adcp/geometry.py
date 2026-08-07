@@ -64,7 +64,20 @@ def cell_depths(pressure, pitch, roll, n_cells, cellsize, blockdis,
         # pitch slot and pitch into the roll slot. Reproduce that swap here.
         _, _, bZ[:, b] = get_unit_vectors(phi, azi[b], roll_rad, pitch_rad)
 
-    good = np.all(bZ > bz_min, axis=1)                       # (nping,)
+    # Keep pings whose beams all point the same way (all up OR all down) and are
+    # sufficiently off-horizontal. z = -pressure + range*bZ then places cells above
+    # (bZ>0, upward-looking) or below (bZ<0, downward-looking) the instrument.
+    good = np.all(bZ > bz_min, axis=1) | np.all(bZ < -bz_min, axis=1)
     z = -pressure[:, None, None] + ranges[None, :, None] * bZ[:, None, :]  # (nping,n_cells,4)
     z[~good] = np.nan
     return z, ranges, bZ
+
+
+def look_direction(pitch, roll, phi_deg: float = BEAM_PHI_DEG, azi_deg=BEAM_AZI_DEG) -> str:
+    """Infer whether the instrument looks 'up' or 'down' from the mean beam vertical
+    component over the given attitude (sign of mean bZ)."""
+    phi = np.deg2rad(phi_deg)
+    azi = np.deg2rad(np.asarray(azi_deg, float))
+    pr, rr = np.deg2rad(np.asarray(roll, float)), np.deg2rad(np.asarray(pitch, float))
+    mean_bz = np.nanmean([get_unit_vectors(phi, azi[b], pr, rr)[2] for b in range(4)])
+    return "up" if mean_bz > 0 else "down"
