@@ -1,11 +1,11 @@
-"""Data-free unit tests for ww_adcp.transforms (beam<->XYZ<->ENU).
+"""Data-free unit tests for ww_sig1000.transforms (beam<->XYZ<->ENU).
 
 A real-data cross-check against dolfyn.rotate2 lives in dev scripts; these tests
 pin the algebra so the ported transforms can't silently drift.
-Run: pytest ww_adcp/tests/
+Run: pytest ww_sig1000/tests/
 """
 import numpy as np
-from ww_adcp.transforms import beam2xyz_matrix, beam2enu, xyz2enu, BEAM_ANGLE_DEG
+from ww_sig1000.transforms import beam2xyz_matrix, beam2enu, xyz2enu, BEAM_ANGLE_DEG
 
 
 def test_beam2xyz_matrix_values():

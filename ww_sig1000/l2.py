@@ -61,7 +61,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                "corr_min": corr_min, "min_bin_samples": min_bin_samples,
                "motion_correction": ("WWcorr_beam (bandpass-integrated IMU + dp/dt)"
                                      if motion_correct else "none"),
-               "processing": "ww_adcp port of WW_Velocity_Processing_SWOT",
+               "processing": "ww_sig1000 port of WW_Velocity_Processing_SWOT",
                "date_created": _time.strftime("%Y-%m-%dT%H:%M:%S")},
     )
 
@@ -133,7 +133,12 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, boxsize=1.0, z_
     while start < total:
         stop = min(start + chunk, total)
         ds_chunk = reader(fn, nens=[start, stop])
-        buf = ds_chunk if buf is None else xr.concat([buf, ds_chunk], dim="time")
+        # drop HR beam-5 data (own time_b5/range_b5 axes) — not used for velocity L2,
+        # and it breaks concatenation along 'time'.
+        ds_chunk = ds_chunk.drop_dims([d for d in ("time_b5", "range_b5")
+                                       if d in ds_chunk.dims])
+        buf = ds_chunk if buf is None else xr.concat([buf, ds_chunk], dim="time",
+                                                     data_vars="minimal", coords="minimal")
 
         fs = float(buf.attrs["fs"])
         press = buf["pressure"].values

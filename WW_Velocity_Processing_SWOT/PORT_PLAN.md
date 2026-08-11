@@ -107,7 +107,7 @@ Stages, in `process_WW_ADCP_main.m` order:
 
 | MATLAB file | Role | Python target | Notes |
 |---|---|---|---|
-| `process_WW_ADCP_main.m` | driver script + `variables` struct | `process_ww_adcp.py` CLI + `config.json` keys | mirror `process_wirewalker_rbr.py` arg/level style; move all `variables.*` into config |
+| `process_WW_ADCP_main.m` | driver script + `variables` struct | `process_ww_sig1000.py` CLI + `config.json` keys | mirror `process_wirewalker_rbr.py` arg/level style; move all `variables.*` into config |
 | `SetupPath.m` | make Combined/Profile/ReOrdered/Grid/Fig dirs | `pathlib`-based helper | derive from `output_dir`, levels as subdirs |
 | `sort_file.m` | sort raw `.mat` by time | **obsolete** — DOLfYN | `dolfyn.read()` returns a time-ordered Dataset |
 | `merge_signature.m` | concat N raw files | **obsolete** — DOLfYN | read `.ad2cp` directly; no `.mat` merge step |
@@ -172,14 +172,14 @@ adcp:
 0. **Ingestion spike** ✅ **DONE** — `from mhkit import dolfyn; dolfyn.read()` on a
    sample `.ad2cp`; DOLfYN schema mapped and IBurstHR (beam-5) turbulence records
    confirmed loading. See "Spike results" above.
-1. `transforms.py` — **`Beam2XYZ`/`XYZ2ENU`/`Beam2ENU` ported** (`ww_adcp/transforms.py`)
+1. `transforms.py` — **`Beam2XYZ`/`XYZ2ENU`/`Beam2ENU` ported** (`ww_sig1000/transforms.py`)
    and **cross-checked vs `dolfyn.rotate2('earth')`** on a real `.ad2cp`: E/N/U agree
    to corr > 0.9999, RMS diff ~1 mm/s (vs ~10-40 cm/s signal), even at large tilt;
    no axis swap. Conclusion: the toolbox Euler rotation and DOLfYN's AHRS-orientmat
    rotation are equivalent — the port can **use `dolfyn.rotate2`** (AHRS-based, more
-   accurate at extreme tilt) and keep `ww_adcp.transforms` as a validated fallback /
+   accurate at extreme tilt) and keep `ww_sig1000.transforms` as a validated fallback /
    cross-check. **`GetUnitVectors` + per-ping depth geometry ported** too
-   (`ww_adcp/geometry.py`: `beam_ranges`, `cell_depths` giving `z = -pressure +
+   (`ww_sig1000/geometry.py`: `beam_ranges`, `cell_depths` giving `z = -pressure +
    range*bZ`). Validated: `beam_ranges` matches DOLfYN's `range` coord to 1e-15 m,
    and `cell_depths` behaves correctly on a synthetic upright ping; the all-4-beams-up
    mask rejects a non-nominal (moored, heavily tilted) sample as expected. TODO:

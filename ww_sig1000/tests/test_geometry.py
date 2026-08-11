@@ -1,7 +1,7 @@
-"""Data-free unit tests for ww_adcp.geometry and get_unit_vectors."""
+"""Data-free unit tests for ww_sig1000.geometry and get_unit_vectors."""
 import numpy as np
-from ww_adcp.transforms import get_unit_vectors
-from ww_adcp.geometry import beam_ranges, cell_depths, BEAM_PHI_DEG
+from ww_sig1000.transforms import get_unit_vectors
+from ww_sig1000.geometry import beam_ranges, cell_depths, BEAM_PHI_DEG
 
 
 def test_unit_vectors_zero_tilt():
