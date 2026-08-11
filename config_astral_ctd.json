@@ -1,0 +1,26 @@
+{
+  "rsk_file": "/Users/drew/PyWirewalker/ww_sig1000/test_data/066045_20240609_0254.rsk",
+  "output_dir": "~/NOPP/data/astral_ctd_processing",
+  "basename": "ASTRAL_1_RBR-Concerto-66045",
+  "mooring": "ASTRAL_1",
+  "instrument": "RBRconcerto3 S/N 66045",
+  "latitude": 0.0,
+  "longitude": 0.0,
+  "atmospheric_pressure_dbar": 10.1325,
+  "sampling_hz": 6.0,
+  "thermal_mass": {
+    "alpha": 0.04,
+    "beta_per_s": 0.1,
+    "gamma": 1.0
+  },
+  "grid": {
+    "l2_dz_m": 0.5,
+    "zmin_m": 0.0,
+    "zmax_m": 110.0,
+    "l3_dz_m": 1.0,
+    "l3_dt": "30min",
+    "l3_interp_max_gap_bins": 1
+  },
+  "n2_vertical_smoothing_m": 5.0,
+  "gravity": 9.81
+}
