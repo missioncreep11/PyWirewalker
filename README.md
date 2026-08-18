@@ -26,6 +26,7 @@ Nortek `.ad2cp`); the ADCP turbulence ε reproduces the published paper product 
 | `ww_sig1000/validation/` | turbulence reproducibility scripts (not part of the pipeline) |
 | `WW_Velocity_Processing_SWOT/` | MATLAB reference toolbox — kept local, not in the repo (from [`modscripps/wirewalker`](https://github.com/modscripps/wirewalker)) |
 | `config.json` | CTD deployment/machine settings (no paths hardcoded in code) |
+| `config_adcp.json` | ADCP deployment settings (paths, metadata, per-product params) |
 | `wirewalker_ctd_processing.ipynb`, `wirewalker_ctd_plots.ipynb` | CTD diagnostics |
 
 ## Environment
@@ -135,25 +136,37 @@ Boyer/Northcott — kept locally under `WW_Velocity_Processing_SWOT/`, not distr
 Reads the raw `.ad2cp` **directly** via MHKiT/DOLfYN (`from mhkit import dolfyn`) — the Nortek
 `.mat` export step is obsolete. The 5-beam head gives two independent products, both streamed
 from the raw file in ensemble chunks (casts crossing a chunk boundary are carried), both
-`(depth, cast)` NetCDF. Instrument geometry (cell size, blanking, ambiguity velocity, sample
-rate) is read from the file — there is no config file for the ADCP; everything is on the CLI.
+`(depth, cast)` NetCDF.
+
+Deployment settings live in **`config_adcp.json`** (parallel to the CTD's `config.json`):
+paths, metadata, and the per-product processing choices. Any CLI flag overrides the config,
+and the resolved values are written into the output NetCDF attributes for provenance.
+Instrument *geometry* (cell size, blanking, ambiguity velocity, sample rate) is **not** in
+the config — it is read straight from the `.ad2cp` at run time.
 
 ```bash
-# motion-corrected ENU currents (4 slant beams, pulse-incoherent)
-python process_ww_sig1000.py --product velocity \
-    --file  raw/DEPLOY.ad2cp --out out/DEPLOY_L2.nc \
-    --mooring DEPLOY --boxsize 1.0
+# 1. configure: edit config_adcp.json -> ad2cp_file, output_dir, basename, mooring, params
+#    (paths may use ~; override with env vars WW_AD2CP / WW_OUTPUT_DIR / WW_ADCP_CONFIG)
 
-# HR beam-5 spectral turbulent dissipation eps (pulse-coherent)
-python process_ww_sig1000.py --product turbulence \
-    --file  raw/DEPLOY.ad2cp --out out/DEPLOY_turb.nc \
-    --mooring DEPLOY --dep-res 3.0 --max-dep 100.0
+# 2. build a product (config-driven; output name derived from basename + grid)
+python process_ww_sig1000.py --product velocity      # motion-corrected ENU currents (slant beams)
+python process_ww_sig1000.py --product turbulence    # HR beam-5 spectral dissipation eps
+python process_ww_sig1000.py --product turbulence --config /path/to/other.json
+
+# 3. or override any config value on the CLI (e.g. a one-off file)
+python process_ww_sig1000.py --product velocity \
+    --file ww_sig1000/test_data/S101913A013_ASTRAL_1_U.ad2cp \
+    --out  out/ASTRAL_1_U_L2.nc --mooring ASTRAL_1_U --boxsize 1.0
 ```
 
-Shared flags: `--chunk` (ensembles per streaming read, default 500 000), `--cast-kind`
-(`both`/`up`/`down`; default `both` for velocity, `up` for turbulence), `--min-span-dbar`,
-`--corr-min`. Velocity-only: `--boxsize`, `--z-max`, `--no-motion` (disable IMU motion
-correction). Turbulence-only: `--dep-res`, `--max-dep`.
+Config sections (all optional beyond the paths): **top-level** `ad2cp_file`, `output_dir`,
+`basename`, `mooring`, `instrument`, `latitude`/`longitude`; **`velocity`** `boxsize_m`,
+`z_max_m` (null → auto), `motion_correct`; **`turbulence`** `dep_res_m`, `max_dep_m`;
+**`cast`** (shared) `kind` (null → `both` for velocity, `up` for turbulence), `min_span_dbar`,
+`corr_min`, `chunk`. The matching CLI overrides are `--file/--out/--mooring`, `--boxsize`,
+`--z-max`, `--no-motion`, `--dep-res`, `--max-dep`, `--cast-kind`, `--min-span-dbar`,
+`--corr-min`, `--chunk`. With no config file present, built-in defaults apply so the tool
+still runs purely from CLI flags.
 
 ## Products
 
