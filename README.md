@@ -24,7 +24,7 @@ Nortek `.ad2cp`); the ADCP turbulence ε reproduces the published paper product 
 | `ww_rbr/` | CTD package (`config`, `rsk`, `levels`, `derive`) + tests |
 | `ww_sig1000/` | ADCP package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`) + tests |
 | `ww_sig1000/validation/` | turbulence reproducibility scripts (not part of the pipeline) |
-| `WW_Velocity_Processing_SWOT/` | vendored MATLAB reference toolbox (velocity) |
+| `WW_Velocity_Processing_SWOT/` | MATLAB reference toolbox — kept local, not in the repo (from [`modscripps/wirewalker`](https://github.com/modscripps/wirewalker)) |
 | `config.json` | CTD deployment/machine settings (no paths hardcoded in code) |
 | `wirewalker_ctd_processing.ipynb`, `wirewalker_ctd_plots.ipynb` | CTD diagnostics |
 
@@ -130,7 +130,8 @@ isopycnal-depth series, and a single-isopycnal depth spectrum. Static figures go
 # ADCP — Nortek Signature1000
 
 A Python port of the Wirewalker Signature1000 velocity/turbulence toolbox (original MATLAB
-in `WW_Velocity_Processing_SWOT/`, from `modscripps/wirewalker`; Zheng/Lucas/Le Boyer/Northcott).
+from [`modscripps/wirewalker`](https://github.com/modscripps/wirewalker); Zheng/Lucas/Le
+Boyer/Northcott — kept locally under `WW_Velocity_Processing_SWOT/`, not distributed here).
 Reads the raw `.ad2cp` **directly** via MHKiT/DOLfYN (`from mhkit import dolfyn`) — the Nortek
 `.mat` export step is obsolete. The 5-beam head gives two independent products, both streamed
 from the raw file in ensemble chunks (casts crossing a chunk boundary are carried), both

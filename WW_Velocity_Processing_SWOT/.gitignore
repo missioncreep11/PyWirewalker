@@ -1,5 +1,0 @@
-# Large data / processing outputs — not tracked (rebuild from raw .ad2cp/.mat)
-*.mat
-*.asv
-proc/
-.DS_Store
