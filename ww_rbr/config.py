@@ -3,7 +3,7 @@
 A `Config` dataclass replaces the old module-level globals: it holds every
 deployment- and machine-specific setting plus the derived product paths, and is
 passed explicitly to `build_L1/L2/L3`. `load_config` reads the JSON config
-(`config.json` beside the repo by default; override with `--config` / `$WW_CONFIG`)
+(`config_ctd.json` beside the repo by default; override with `--config` / `$WW_CONFIG`)
 and applies the `$WW_RSK` / `$WW_OUTPUT_DIR` path overrides.
 """
 from __future__ import annotations
@@ -64,11 +64,11 @@ class Config:
 
 def load_config(path=None) -> Config:
     """Load the JSON config into a `Config` (explicit `path`, else `$WW_CONFIG`,
-    else `config.json` at the repo root). `$WW_RSK` / `$WW_OUTPUT_DIR` override paths."""
-    p = Path(path or os.environ.get("WW_CONFIG") or _HERE.parent / "config.json").expanduser()
+    else `config_ctd.json` at the repo root). `$WW_RSK` / `$WW_OUTPUT_DIR` override paths."""
+    p = Path(path or os.environ.get("WW_CONFIG") or _HERE.parent / "config_ctd.json").expanduser()
     if not p.exists():
         raise FileNotFoundError(
-            f"config not found: {p}\nEdit config.json with your deployment paths and metadata.")
+            f"config not found: {p}\nEdit config_ctd.json with your deployment paths and metadata.")
     with open(p) as f:
         cfg = json.load(f)
     gr = cfg.get("grid", {})

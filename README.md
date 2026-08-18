@@ -19,13 +19,13 @@ Nortek `.ad2cp`); the ADCP turbulence ε reproduces the published paper product 
 
 | Path | What |
 |------|------|
-| `process_wirewalker_rbr.py` | CTD driver (`--level 1/2/3/all`), reads `config.json` |
+| `process_wirewalker_rbr.py` | CTD driver (`--level 1/2/3/all`), reads `config_ctd.json` |
 | `process_ww_sig1000.py` | ADCP driver (`--product velocity/turbulence`), args on the CLI |
 | `ww_rbr/` | CTD package (`config`, `rsk`, `levels`, `derive`) + tests |
 | `ww_sig1000/` | ADCP package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`) + tests |
 | `ww_sig1000/validation/` | turbulence reproducibility scripts (not part of the pipeline) |
 | `WW_Velocity_Processing_SWOT/` | MATLAB reference toolbox — kept local, not in the repo (from [`modscripps/wirewalker`](https://github.com/modscripps/wirewalker)) |
-| `config.json` | CTD deployment/machine settings (no paths hardcoded in code) |
+| `config_ctd.json` | CTD deployment/machine settings (no paths hardcoded in code) |
 | `config_adcp.json` | ADCP deployment settings (paths, metadata, per-product params) |
 | `wirewalker_ctd_processing.ipynb`, `wirewalker_ctd_plots.ipynb` | CTD diagnostics |
 
@@ -49,11 +49,11 @@ A configurable L0→L1→L2→L3 chain and diagnostic notebook for Wirewalker-mo
 Concerto CTDs. Reference deployment: mooring **NOPP-Aleutians**, RBR Concerto³ S/N 213752,
 2025-07 → 2026-05, 2 Hz continuous (~52.8 M scans, max ~518 dbar).
 
-All deployment- and machine-specific settings live in **`config.json`** — no paths are
+All deployment- and machine-specific settings live in **`config_ctd.json`** — no paths are
 hardcoded. Point it at your `.rsk` and an output directory.
 
 ```bash
-# 1. configure: edit config.json -> rsk_file, output_dir, basename, lat/lon, atm pressure
+# 1. configure: edit config_ctd.json -> rsk_file, output_dir, basename, lat/lon, atm pressure
 #    (paths may use ~; or override with env vars WW_RSK / WW_OUTPUT_DIR / WW_CONFIG)
 # 2. build the products  (L1 from the .rsk, then L2, L3 from the level below)
 python process_wirewalker_rbr.py --level all               # or --level 1 / 2 / 3
@@ -114,7 +114,7 @@ is passed through under a name slugged from its long name (e.g. `backscatter`, `
 - **Buoyancy frequency** (L3): `buoyancy_frequency_squared` = (g/ρ₀)·dσ₀/dz after a **5 m**
   nan-aware boxcar vertical smooth; z positive down. Length in `n2_vertical_smoothing_m`.
 
-### Configuration (`config.json`)
+### Configuration (`config_ctd.json`)
 
 - **paths** — `rsk_file`, `output_dir` (where `L1/ L2/ L3/` are written), `basename`.
   May use `~`; override with `WW_RSK` / `WW_OUTPUT_DIR`.
@@ -138,7 +138,7 @@ Reads the raw `.ad2cp` **directly** via MHKiT/DOLfYN (`from mhkit import dolfyn`
 from the raw file in ensemble chunks (casts crossing a chunk boundary are carried), both
 `(depth, cast)` NetCDF.
 
-Deployment settings live in **`config_adcp.json`** (parallel to the CTD's `config.json`):
+Deployment settings live in **`config_adcp.json`** (parallel to the CTD's `config_ctd.json`):
 paths, metadata, and the per-product processing choices. Any CLI flag overrides the config,
 and the resolved values are written into the output NetCDF attributes for provenance.
 Instrument *geometry* (cell size, blanking, ambiguity velocity, sample rate) is **not** in

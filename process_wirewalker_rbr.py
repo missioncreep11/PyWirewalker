@@ -29,7 +29,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--level", choices=["1", "2", "3", "all"], required=True)
     ap.add_argument("--config", default=None,
-                    help="path to config.json (default: ./config.json or $WW_CONFIG)")
+                    help="path to config_ctd.json (default: ./config_ctd.json or $WW_CONFIG)")
     ap.add_argument("--max-casts", type=int, default=None,
                     help="process only the first N casts (for testing)")
     args = ap.parse_args()
