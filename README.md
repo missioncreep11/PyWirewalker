@@ -122,6 +122,10 @@ is passed through under a name slugged from its long name (e.g. `backscatter`, `
 - **processing** — `sampling_hz`, `thermal_mass` (α/β/γ), `grid` (L2/L3 bin sizes, gap-fill),
   `n2_vertical_smoothing_m`, `gravity`.
 
+`config_ctd.json` is the default (NOPP-Aleutians reference deployment); `config_astral_ctd.json`
+is a second tracked example (ASTRAL_1) — process it with
+`process_wirewalker_rbr.py --level all --config config_astral_ctd.json`.
+
 The plots notebook (`wirewalker_ctd_plots.ipynb`, loads L1/L2/L3/L3i) produces cast-flag
 checks, time–depth sections, T–S diagrams, deployment-mean profiles, N² sections, an
 isopycnal-depth series, and a single-isopycnal depth spectrum. Static figures go to `figs/`.
@@ -167,6 +171,11 @@ Config sections (all optional beyond the paths): **top-level** `ad2cp_file`, `ou
 `--z-max`, `--no-motion`, `--dep-res`, `--max-dep`, `--cast-kind`, `--min-span-dbar`,
 `--corr-min`, `--chunk`. With no config file present, built-in defaults apply so the tool
 still runs purely from CLI flags.
+
+> **Runtime:** the *first* dolfyn read of a raw `.ad2cp` builds a `.ad2cp.index` sidecar
+> next to it (one-time, can take minutes on a large file — this is normal, not a hang).
+> With the index in place, a full ~10 GB deployment streams in ~25–30 min; progress prints
+> per chunk. The `.index` files are gitignored.
 
 ## Products
 
