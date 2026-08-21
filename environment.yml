@@ -16,6 +16,8 @@ dependencies:
   - pip
   - pip:
       - plotly       # interactive notebook plots
+      - ipywidgets   # slider/dropdown controls in the exploration notebooks
+      - anywidget    # required by plotly >= 6 for go.FigureWidget
       - nbstripout   # strips notebook outputs on commit
       - mhkit        # read raw Nortek .ad2cp ADCP files: `from mhkit import dolfyn`
                      # (maintained successor to the standalone dolfyn; supports numpy 2 / scipy 1.18)

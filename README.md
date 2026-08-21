@@ -22,7 +22,7 @@ Nortek `.ad2cp`); the ADCP turbulence ε reproduces the published paper product 
 | `process_wirewalker_rbr.py` | CTD driver (`--level 1/2/3/all`), reads `config_ctd.json` |
 | `process_ww_sig1000.py` | ADCP driver (`--product velocity/turbulence`), args on the CLI |
 | `ww_rbr/` | CTD package (`config`, `rsk`, `levels`, `derive`) + tests |
-| `ww_sig1000/` | ADCP package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`) + tests |
+| `ww_sig1000/` | ADCP package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`, `index`) + tests |
 | `ww_sig1000/validation/` | turbulence reproducibility scripts (not part of the pipeline) |
 | `WW_Velocity_Processing_SWOT/` | MATLAB reference toolbox — kept local, not in the repo (from [`modscripps/wirewalker`](https://github.com/modscripps/wirewalker)) |
 | `config_ctd.json` | CTD deployment/machine settings (no paths hardcoded in code) |
@@ -182,6 +182,7 @@ still runs purely from CLI flags.
 - **velocity** (`ww_sig1000/{transforms,geometry,casts,velocity,motion,l2}.py`) — beam →
   XYZ → ENU on the 4 slant beams, IMU motion correction, bin-averaged to a `--boxsize`
   depth grid. Reproduces the paper's Fig-9f internal-tide currents.
+
 - **turbulence** (`ww_sig1000/turbulence.py` + streaming assembler `turb_product.py`) —
   spectral dissipation ε from the pulse-coherent HR beam-5. An **exact port of
   `ProcessSingleProfile.m`** (Devon Northcott's final paper code from Dryad
@@ -190,6 +191,115 @@ still runs purely from CLI flags.
   velocity → deep-profile (`pressure>50`) stagnation subtraction → cutoff-nearest-1 m →
   despike/detrend → band-averaged wavenumber spectra → Kolmogorov fit `S(k)=N+A·k^(−5/3)`,
   ε = (A/0.53)^(3/2). Output vars: `epsilon`, `N`, `SNR`, `A`, `corr`, `num_spectra`.
+
+## Ambiguous config paths need confirmation
+
+A relative path resolves against the process working directory, so
+`--config config_adcp.json` names a different deployment depending on where the shell
+happens to be — and the run then completes against the wrong raw file, reporting
+success. Both drivers therefore **warn and require agreement** before using a relative
+`--config` (or a relative `$WW_ADCP_CONFIG` / `$WW_CONFIG`). The warning names the
+mooring and raw file it is about to load, which is what reveals a wrong one:
+
+```
+WARNING: --config 'config_adcp.json' is a relative path, resolved against the
+  current working directory (/Users/drew/PyWirewalker).
+  It resolves to : /Users/drew/PyWirewalker/config_adcp.json
+  which contains : TLC_23  ->  ~/TLC/2023/Wirewalker/Nortek/S101913A008_TLC_23.ad2cp
+  Proceed with this config? [y/N]
+```
+
+Anything but `y`/`yes` aborts, as do Ctrl-C and Ctrl-D. With no terminal attached
+(a script, a queued job) there is no way to agree, so the run stops unless `-y` /
+`--yes` is passed. An **absolute** path — `~` counts — is unambiguous and never
+prompts, so it stays the right habit for anything scripted.
+
+With no `--config`, a `config_<ctd|adcp>.json` in the working directory or at the repo
+root is used silently. If **both** exist, the same confirmation applies, showing which
+deployment each one names; the working-directory copy is the one offered.
+
+## Trimming deployment/recovery transit
+
+A record usually starts before the mooring is in the water and ends after it comes
+back, and that transit can produce pressure excursions large enough to pass
+`min_span_dbar` and enter the product as spurious casts. Bound the ensemble range with
+`cast.start_time` / `cast.end_time` in the config (ISO times, resolved against the
+dolfyn index) or `cast.start_ensemble` / `cast.end_ensemble`; the CLI equivalents are
+`--start-time` / `--end-time` / `--start-ensemble` / `--end-ensemble`, and times win
+over ensembles. The resolved range is written to the `ensemble_range` attribute.
+
+`ww_sig1000/index.py` reads the `.ad2cp.index` sidecar directly, which also gives the
+**exact** ensemble count — previously the streaming builders probed the reader by
+bisection, which cost many reads and rounded *down* to a 5000-ensemble tolerance,
+silently dropping up to ~10 min of data at 8 Hz. It doubles as a CLI:
+
+```bash
+python -m ww_sig1000.index raw.ad2cp                          # build/inspect the index
+python -m ww_sig1000.index raw.ad2cp --at-time 2023-09-19T18:30:00
+```
+
+`summarize` reports record counts, ensemble count, start/end times and whether beam-5
+(record 0x18) is present — useful for deciding up front whether a deployment can
+produce the turbulence product at all.
+
+> Note: `nortek2_lib.get_index` defaults to `eof=2**32` and silently stops indexing at
+> 4 GB; `ww_sig1000.index` passes the true file length, as dolfyn's own reader does.
+> Index dates use the raw year byte (year − 1900) and a **1-based** month — not the
+> zero-based month of the data record.
+
+## Duty-cycled (burst) deployments
+
+Cast detection is burst-aware. `casts.detect_bursts` splits the record into contiguous
+sampling blocks (any time step > `gap_s`, default 30 s, starts a new burst), and the
+low-pass + turning-point detection runs **within each burst independently** — filtering
+across a multi-hour gap smears the pressure discontinuity into the burst edges and
+orphans samples there. A continuously sampled record is a single burst, so this is a
+no-op for one: detection is bit-identical to the pre-burst-aware code (checked against
+ASTRAL_1_U, 72 casts, exact match).
+
+Because a burst rarely starts or ends on a profile turning point, casts at burst
+boundaries are **clipped** and cover only part of the water column. Every cast carries a
+`profile_complete` flag (1 = bounded by turning points, 0 = truncated by a burst edge or
+the record edge), alongside `pressure_min` / `pressure_max`, so gridding can weight or
+exclude partial profiles; `n_casts_truncated` is in the global attributes. Truncated
+casts are still valid velocity data over the depth range they do cover — they are
+flagged, not dropped.
+
+On the NOPP1-California record (40-min bursts every 2h20m, 0–500 dbar profiles) each
+burst yields ~2 complete profiles bracketed by 2 truncated ones: **48% of casts are
+truncated**, and they cover 47% of the depth bins on average against 95% for complete
+casts. The streaming reader carries a boundary cast — and its truncation state — across
+chunks, so the product is bit-identical regardless of `--chunk`.
+
+## Platform kinematics and AHRS validation
+
+`ww_sig1000/platform.py` reconstructs what the vehicle was doing during a cast — tilt,
+rotation, climb, wave heave — and **checks the instrument's orientation solution against
+its own raw sensors**. That check is not optional hygiene: on NOPP_d2 the AHRS emitted
+physically impossible attitudes on **15.7% of casts**, including 11 casts reporting tilt
+past horizontal, while the accelerometer and gyro stayed healthy in every one of them.
+
+```bash
+python -m ww_sig1000.platform --config /abs/path/config_adcp.json --cast-kind both
+```
+
+writes one row per cast to `ahrs_scan.csv` (~40 min for a 41 GB file), with
+`ahrs_error_deg`, `tilt_accel_deg` vs `tilt_ahrs_deg`, `gyro_dps` vs `ahrs_dps`, and
+`ahrs_ok`. It needs only `orientmat`, `accel`, `angrt` and `pressure`, so any Signature
+record with the AHRS enabled can be screened without rebuilding its velocity product.
+
+`ahrs_error` is the **per-ping** angle between where the AHRS puts earth-up (third row
+of `orientmat`) and where the accelerometer measures it, compared in the instrument
+frame. Per-ping matters: rotating acceleration into earth and measuring how far the
+*mean* lands from vertical collapses when the false attitude is rotating, because the
+horizontal residuals average away — that method reports 3.2° for a 43° error.
+
+Why it matters for velocity: an attitude error leaks the platform's own ~0.45 m/s ascent
+into the horizontal as `0.45·sin(δθ)`. Doppler beam noise dominates *per ping* by ~100×,
+but it averages down as `1/√n_obs` while a correlated attitude error does not — so after
+binning, attitude is the term that survives. `classify()` therefore reports
+`ahrs_fault` before any attitude-derived label, since none of them mean anything on a
+bad solution.
 
 ## Validation (ADCP)
 
