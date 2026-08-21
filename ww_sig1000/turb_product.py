@@ -27,15 +27,18 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
     nz, ncast = zc.size, len(results)
     G = {k: np.full((nz, ncast), np.nan, np.float32) for k in _VARS}
     ctime = np.empty(ncast, "datetime64[ns]")
+    ccomplete = np.zeros(ncast, np.int8)
     for j, r in enumerate(results):
         for k in _VARS:
             G[k][:, j] = r[k]
         ctime[j] = r["time"]
+        ccomplete[j] = r["complete"]
 
     order = np.argsort(ctime)
     for k in G:
         G[k] = G[k][:, order]
-    ctime = ctime[order]
+    ctime, ccomplete = ctime[order], ccomplete[order]
+    n_trunc = int((ccomplete == 0).sum())
 
     return xr.Dataset(
         {"epsilon": (("depth", "cast"), G["eps"],
@@ -51,9 +54,17 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
                          {"long_name": "spectra averaged per bin"})},
         coords={"depth": ("depth", zc.astype(np.float32), {"units": "m", "positive": "down"}),
                 "cast": ("cast", np.arange(ncast, dtype=np.int32)),
-                "time": ("cast", ctime, {"long_name": "cast mid-time"})},
+                "time": ("cast", ctime, {"long_name": "cast mid-time"}),
+                "profile_complete": ("cast", ccomplete,
+                                     {"long_name": "profile completeness flag",
+                                      "flag_values": np.array([0, 1], np.int8),
+                                      "flag_meanings": "truncated complete",
+                                      "comment": "0 = clipped by a duty-cycle burst boundary "
+                                                 "or the record edge; 1 = bounded by pressure "
+                                                 "turning points"})},
         attrs={"title": f"{mooring} Wirewalker ADCP HR turbulence (spectral eps)",
                "mooring": mooring, "source_file": source,
+               "n_casts_truncated": n_trunc,
                "method": "wavenumber-spectrum, S(k)=N+A k^-5/3, eps=(A/0.53)^3/2",
                "dep_res_m": dep_res, "max_dep_m": max_dep, "corr_min": corr_min,
                "processing": "ww_sig1000 port of ProcessSingleProfile.m (Northcott et al. 2026)",
@@ -61,21 +72,24 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
     )
 
 
-def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None,
+def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0,
                                dep_res=3.0, max_dep=100.0, cast_kind="up",
-                               min_span_dbar=40.0, corr_min=50, thhold_s=30.0,
+                               min_span_dbar=40.0, corr_min=50, thhold_s=30.0, gap_s=30.0,
                                mooring="", source="", progress=True):
     """Stream a raw `.ad2cp`, producing a (depth, cast) turbulence Dataset.
 
     `reader` is dolfyn.read. Casts are detected on buffered pressure; the last
     (possibly boundary-spanning) cast is carried into the next chunk. Beam-5
     geometry (cell_size_b5, blank_dist_b5, ambig_vel_b5) is read from the file.
+    `ens_start` / `total` bound the ensemble range, trimming deployment/recovery
+    transit off the ends.
     """
     if total is None:
         total = _count_ensembles(fn, reader)
     kinds = ("up", "down") if cast_kind == "both" else (cast_kind,)
     results, buf, geom = [], None, None
-    start, t0 = 0, _time.time()
+    carry_trunc = None      # start-truncation of the cast carried in from the last chunk
+    start, t0 = int(ens_start), _time.time()
 
     while start < total:
         stop = min(start + chunk, total)
@@ -98,7 +112,10 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None,
 
         press = buf["press"]
         t_s = buf["t"].astype("int64") / 1e9
-        casts = detect_casts(press, t_s, thhold=int(thhold_s * geom["fs"]))
+        casts = detect_casts(press, t_s, thhold=int(thhold_s * geom["fs"]), gap_s=gap_s,
+                             first_is_continuation=carry_trunc is not None)
+        if carry_trunc and casts:
+            casts[0].truncated = True     # already clipped in the previous chunk
         last = stop < total                       # hold back final cast if more coming
         to_do = casts[:-1] if (last and casts) else casts
         for c in to_do:
@@ -111,11 +128,16 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None,
                     max_dep=max_dep, corr_min=corr_min,
                     time=buf["t"][sl][(c.stop - c.start) // 2])
                 if r is not None:
+                    r["complete"] = 0 if c.truncated else 1
                     results.append(r)
         if last and casts:
-            s0 = int(casts[-1].start)
+            held = casts[-1]
+            s0 = int(held.start)
+            carry_trunc = bool(s0 > 0 and t_s[s0] - t_s[s0 - 1] > gap_s) \
+                or (s0 == 0 and bool(carry_trunc))
             buf = {k: (buf[k][:, s0:] if buf[k].ndim == 2 else buf[k][s0:]) for k in buf}
         else:
+            carry_trunc = None
             buf = None
         if progress:
             print(f"  [{start:>10,},{stop:>10,}) casts_total={len(results):>4d} "
@@ -124,8 +146,10 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None,
 
     if not results:
         raise RuntimeError(f"no {cast_kind}-casts with span >= {min_span_dbar} dbar found")
-    return _assemble(results, cellsize=geom["cs"], dep_res=dep_res, max_dep=max_dep,
-                     corr_min=corr_min, mooring=mooring, source=source)
+    ds = _assemble(results, cellsize=geom["cs"], dep_res=dep_res, max_dep=max_dep,
+                   corr_min=corr_min, mooring=mooring, source=source)
+    ds.attrs["ensemble_range"] = f"{int(ens_start)}:{int(total)}"
+    return ds
 
 
 def save_turbulence(ds, path):

@@ -42,7 +42,7 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
     Returns dict with keys velE, velN, velU, amp, corr_mean, n_obs (each (nz,)),
-    plus scalars time (datetime64), pressure_max, and the depth grid `z`.
+    plus scalars time (datetime64), pressure_max, pressure_min, and the depth grid `z`.
     """
     a = dsc.attrs
     cs = a["cell_size"] if cell_size is None else cell_size
@@ -118,4 +118,5 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     t = dsc["time"].values
     out["time"] = t[t.size // 2]
     out["pressure_max"] = float(np.nanmax(press))
+    out["pressure_min"] = float(np.nanmin(press))
     return out

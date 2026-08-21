@@ -1,6 +1,8 @@
 """Tests for the ADCP deployment config loader."""
 import json
+from pathlib import Path
 
+import ww_sig1000
 from ww_sig1000.config import AdcpConfig, load_adcp_config
 
 
@@ -17,10 +19,13 @@ def test_dataclass_defaults():
 
 
 def test_repo_template_config_parses():
-    # the tracked config_adcp.json at the repo root should always load cleanly
-    cfg = load_adcp_config()
+    # the tracked config_adcp.json at the repo root should always load cleanly.
+    # Name it explicitly: a bare load_adcp_config() resolves against the working
+    # directory, so this would otherwise test whichever deployment pytest ran from.
+    template = Path(ww_sig1000.__file__).resolve().parent.parent / "config_adcp.json"
+    cfg = load_adcp_config(template)
     assert isinstance(cfg, AdcpConfig)
-    assert cfg.config_path is not None and cfg.config_path.name == "config_adcp.json"
+    assert cfg.config_path == template
 
 
 def test_loads_and_derives_paths(tmp_path, monkeypatch):

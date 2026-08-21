@@ -20,26 +20,32 @@ from .velocity import process_cast, output_grid
 
 def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_samples,
               motion_correct, mooring, source):
-    """Stack a list of (cast_result, direction) into an L2 xarray.Dataset."""
+    """Stack a list of (cast_result, Cast) into an L2 xarray.Dataset."""
     zc = output_grid(boxsize, z_max)
     nz, ncast = zc.size, len(results)
     G = {k: np.full((nz, ncast), np.nan, np.float32) for k in ("velE", "velN", "velU", "amp")}
     nobs = np.zeros((nz, ncast), np.int32)
     ctime = np.empty(ncast, "datetime64[ns]")
     cpmax = np.zeros(ncast)
+    cpmin = np.zeros(ncast)
     cdir = np.zeros(ncast, np.int8)
-    for j, (g, direction) in enumerate(results):
+    ccomplete = np.zeros(ncast, np.int8)
+    for j, (g, cast) in enumerate(results):
         for k in G:
             G[k][:, j] = g[k]
         nobs[:, j] = g["n_obs"]
         ctime[j] = np.datetime64(g["time"], "ns")
         cpmax[j] = g["pressure_max"]
-        cdir[j] = 1 if direction == "up" else 0
+        cpmin[j] = g["pressure_min"]
+        cdir[j] = 1 if cast.direction == "up" else 0
+        ccomplete[j] = 0 if cast.truncated else 1
 
     order = np.argsort(ctime)                      # ensure time order
     for k in G:
         G[k] = G[k][:, order]
-    nobs, ctime, cpmax, cdir = nobs[:, order], ctime[order], cpmax[order], cdir[order]
+    nobs, ctime, cdir = nobs[:, order], ctime[order], cdir[order]
+    cpmax, cpmin, ccomplete = cpmax[order], cpmin[order], ccomplete[order]
+    n_trunc = int((ccomplete == 0).sum())
 
     return xr.Dataset(
         {"velE": (("depth", "cast"), G["velE"], {"units": "m s-1", "long_name": "eastward velocity"}),
@@ -51,12 +57,22 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                 "cast": ("cast", np.arange(ncast, dtype=np.int32)),
                 "time": ("cast", ctime, {"long_name": "cast mid-time"}),
                 "pressure_max": ("cast", cpmax.astype(np.float32), {"units": "dbar"}),
+                "pressure_min": ("cast", cpmin.astype(np.float32), {"units": "dbar"}),
                 "cast_direction": ("cast", cdir,
                                    {"flag_values": np.array([0, 1], np.int8),
-                                    "flag_meanings": "down up"})},
+                                    "flag_meanings": "down up"}),
+                "profile_complete": ("cast", ccomplete,
+                                     {"long_name": "profile completeness flag",
+                                      "flag_values": np.array([0, 1], np.int8),
+                                      "flag_meanings": "truncated complete",
+                                      "comment": "0 = clipped by a duty-cycle burst boundary "
+                                                 "or the record edge, so the cast covers only "
+                                                 "part of the profile; 1 = bounded by pressure "
+                                                 "turning points"})},
         attrs={"title": f"{mooring} Wirewalker ADCP L2 (gridded velocity)",
                "mooring": mooring, "source_file": source,
                "instrument_look": look, "cast_kind": cast_kind,
+               "n_casts_truncated": n_trunc,
                "grid_boxsize_m": boxsize, "grid_z_max_m": z_max,
                "corr_min": corr_min, "min_bin_samples": min_bin_samples,
                "motion_correction": ("WWcorr_beam (bandpass-integrated IMU + dp/dt)"
@@ -89,14 +105,27 @@ def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.
     results = [(process_cast(ds.isel(time=slice(c.start, c.stop + 1)), corr_min=corr_min,
                              boxsize=boxsize, z_max=z_max, direction=look,
                              min_bin_samples=min_bin_samples, motion_correct=motion_correct),
-                c.direction) for c in casts]
+                c) for c in casts]
     return _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                      corr_min=corr_min, min_bin_samples=min_bin_samples,
                      motion_correct=motion_correct, mooring=mooring, source=source)
 
 
 def _count_ensembles(fn, reader):
-    """Total burst ensembles in `fn`, via exponential probe + bisection (tiny reads)."""
+    """Total burst ensembles in `fn`.
+
+    Read exactly from the dolfyn index, which dolfyn has to build anyway before it
+    can read a single ensemble. Falls back to an exponential probe + bisection if
+    the index cannot be read — that fallback rounds *down* to a 5000-ensemble
+    tolerance, so it can drop ~10 min of data at 8 Hz; the index path does not.
+    """
+    try:
+        from .index import count_ensembles
+        return count_ensembles(fn)
+    except Exception as e:                          # pragma: no cover - fallback path
+        print(f"  [warn] could not read the dolfyn index ({e}); "
+              f"falling back to bisection probe", flush=True)
+
     def ok(start):
         try:
             return reader(fn, nens=[start, start + 4]).sizes.get("time", 0) > 0
@@ -115,20 +144,26 @@ def _count_ensembles(fn, reader):
     return lo
 
 
-def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, boxsize=1.0, z_max=None,
-                       cast_kind="both", min_span_dbar=40.0, corr_min=50, min_bin_samples=10,
-                       thhold_s=30.0, motion_correct=True, mooring="", source="", progress=True):
+def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, boxsize=1.0,
+                       z_max=None, cast_kind="both", min_span_dbar=40.0, corr_min=50,
+                       min_bin_samples=10, thhold_s=30.0, gap_s=30.0, motion_correct=True,
+                       mooring="", source="", progress=True):
     """Grid a raw `.ad2cp` too large for memory. `reader` is dolfyn.read.
 
     Reads the file in `chunk`-ensemble windows, detects/grids casts on a rolling
     buffer, and carries the last (possibly boundary-spanning) cast into the next
     chunk. z_max, if not given, is set from the first chunk's max pressure + range.
+
+    `ens_start` / `total` bound the ensemble range, so the deployment/recovery
+    transit — when the vehicle is on deck or being lowered and is not profiling —
+    can be trimmed off rather than entering the product as spurious casts.
     """
     if total is None:
         total = _count_ensembles(fn, reader)
     kinds = ("up", "down") if cast_kind == "both" else (cast_kind,)
     results, look, buf = [], None, None
-    start, t0 = 0, _time.time()
+    carry_trunc = None      # start-truncation of the cast carried in from the last chunk
+    start, t0 = int(ens_start), _time.time()
 
     while start < total:
         stop = min(start + chunk, total)
@@ -149,7 +184,10 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, boxsize=1.0, z_
             z_max = float(np.ceil((np.nanmax(press) + buf.sizes["range"] * buf.attrs["cell_size"])
                                   / boxsize) * boxsize)
 
-        casts = detect_casts(press, t_s, thhold=int(thhold_s * fs))
+        casts = detect_casts(press, t_s, thhold=int(thhold_s * fs), gap_s=gap_s,
+                             first_is_continuation=carry_trunc is not None)
+        if carry_trunc and casts:
+            casts[0].truncated = True      # it was already clipped in the previous chunk
         last = start + chunk < total       # more data coming -> hold back the final cast
         to_do = casts[:-1] if (last and casts) else casts
         for c in to_do:
@@ -157,20 +195,34 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, boxsize=1.0, z_
                 g = process_cast(buf.isel(time=slice(c.start, c.stop + 1)), corr_min=corr_min,
                                  boxsize=boxsize, z_max=z_max, direction=look,
                                  min_bin_samples=min_bin_samples, motion_correct=motion_correct)
-                results.append((g, c.direction))
-        # carry the tail (from the start of the held-back cast) into the next chunk
+                results.append((g, c))
+        # carry the tail (from the start of the held-back cast) into the next chunk,
+        # remembering whether a real gap clipped its start (unknowable next chunk)
         if last and casts:
-            buf = buf.isel(time=slice(int(casts[-1].start), None))
+            held = casts[-1]
+            carry_trunc = bool(held.start > 0
+                               and t_s[held.start] - t_s[held.start - 1] > gap_s) \
+                or (held.start == 0 and bool(carry_trunc))
+            buf = buf.isel(time=slice(int(held.start), None))
+        elif last:
+            # no cast at all in this window (vehicle not profiling): keep the tail so a
+            # cast straddling the boundary survives, bounded so an idle stretch can't
+            # grow the buffer without limit
+            carry_trunc = None
+            buf = buf.isel(time=slice(-min(buf.sizes["time"], chunk), None))
         else:
+            carry_trunc = None
             buf = None
         if progress:
             print(f"  [{start:>10,},{stop:>10,}) casts_total={len(results):>4d} "
                   f"p={press.min():.0f}..{press.max():.0f} {_time.time()-t0:.0f}s", flush=True)
         start = stop
 
-    return _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
-                     corr_min=corr_min, min_bin_samples=min_bin_samples,
-                     motion_correct=motion_correct, mooring=mooring, source=source)
+    ds = _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
+                   corr_min=corr_min, min_bin_samples=min_bin_samples,
+                   motion_correct=motion_correct, mooring=mooring, source=source)
+    ds.attrs["ensemble_range"] = f"{int(ens_start)}:{int(total)}"
+    return ds
 
 
 def save_l2(ds_l2, path):

@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ww_rbr import load_config, build_L1, build_L2, build_L3   # noqa: E402
+from ww_rbr.config import AmbiguousConfigError                 # noqa: E402
 
 
 def main():
@@ -32,9 +33,14 @@ def main():
                     help="path to config_ctd.json (default: ./config_ctd.json or $WW_CONFIG)")
     ap.add_argument("--max-casts", type=int, default=None,
                     help="process only the first N casts (for testing)")
+    ap.add_argument("-y", "--yes", action="store_true",
+                    help="accept an ambiguous (relative) config path without prompting")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config, assume_yes=args.yes)
+    except AmbiguousConfigError as e:
+        ap.error(str(e))
     print(f"[config] {cfg.mooring} | rsk={cfg.rsk_path} | out={cfg.output_dir}")
     if args.level in ("1", "all"):
         build_L1(cfg, args.max_casts)

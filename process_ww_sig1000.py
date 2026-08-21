@@ -30,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mhkit import dolfyn                       # noqa: E402
-from ww_sig1000.config import load_adcp_config  # noqa: E402
+from ww_sig1000.config import AmbiguousConfigError, load_adcp_config  # noqa: E402
 from ww_sig1000.l2 import build_l2_streaming, save_l2   # noqa: E402
 from ww_sig1000.turb_product import build_turbulence_streaming, save_turbulence  # noqa: E402
 
@@ -56,9 +56,22 @@ def main():
     ap.add_argument("--corr-min", type=int, default=None, help="beam correlation threshold")
     ap.add_argument("--no-motion", action="store_true", help="[velocity] disable IMU motion correction")
     ap.add_argument("--mooring", default=None, help="mooring/deployment name for metadata")
+    ap.add_argument("--start-ensemble", type=int, default=None,
+                    help="first ensemble to process (trims deployment transit)")
+    ap.add_argument("--end-ensemble", type=int, default=None,
+                    help="stop before this ensemble (default: end of record)")
+    ap.add_argument("--start-time", default=None,
+                    help="first ensemble at/after this ISO time (overrides --start-ensemble)")
+    ap.add_argument("--end-time", default=None,
+                    help="stop at this ISO time (overrides --end-ensemble)")
+    ap.add_argument("-y", "--yes", action="store_true",
+                    help="accept an ambiguous (relative) config path without prompting")
     args = ap.parse_args()
 
-    cfg = load_adcp_config(args.config)
+    try:
+        cfg = load_adcp_config(args.config, assume_yes=args.yes)
+    except AmbiguousConfigError as e:
+        ap.error(str(e))
     # overlay CLI overrides (only when explicitly provided)
     if args.file is not None:
         cfg.ad2cp_path = Path(args.file).expanduser()
@@ -82,6 +95,17 @@ def main():
         cfg.corr_min = args.corr_min
     if args.no_motion:
         cfg.motion_correct = False
+    # A CLI bound overrides the config's *other* form of the same bound too —
+    # otherwise a `start_time`/`end_time` in the config silently wins over the
+    # ensemble flag the user just typed (resolve_trim gives times precedence).
+    if args.start_ensemble is not None:
+        cfg.start_ensemble, cfg.start_time = args.start_ensemble, None
+    if args.end_ensemble is not None:
+        cfg.end_ensemble, cfg.end_time = args.end_ensemble, None
+    if args.start_time is not None:
+        cfg.start_time = args.start_time
+    if args.end_time is not None:
+        cfg.end_time = args.end_time
 
     if not str(cfg.ad2cp_path):
         ap.error("no input file: set ad2cp_file in the config or pass --file")
@@ -94,13 +118,18 @@ def main():
     if cfg.config_path:
         print(f"[config] loaded {cfg.config_path}", flush=True)
 
+    ens_start, ens_stop = cfg.resolve_trim()
+    if ens_start or ens_stop is not None:
+        stop_txt = f"{ens_stop:,}" if ens_stop is not None else "end"
+        print(f"[config] ensemble range {ens_start:,}:{stop_txt}", flush=True)
+
     if args.product == "turbulence":
         cast_kind = cfg.cast_kind or "up"
         DS = build_turbulence_streaming(
             str(cfg.ad2cp_path), dolfyn.read, chunk=cfg.chunk, dep_res=cfg.dep_res_m,
             max_dep=cfg.max_dep_m, cast_kind=cast_kind, min_span_dbar=cfg.min_span_dbar,
-            corr_min=cfg.corr_min, mooring=cfg.mooring, source=cfg.ad2cp_path.name,
-            progress=True)
+            corr_min=cfg.corr_min, ens_start=ens_start, total=ens_stop,
+            mooring=cfg.mooring, source=cfg.ad2cp_path.name, progress=True)
         _stamp_provenance(DS, cfg)
         save_turbulence(DS, str(out))
         print(f"[done] {DS.sizes['cast']} casts x {DS.sizes['depth']} depths "
@@ -110,7 +139,8 @@ def main():
         DS = build_l2_streaming(
             str(cfg.ad2cp_path), dolfyn.read, chunk=cfg.chunk, boxsize=cfg.boxsize_m,
             z_max=cfg.z_max_m, cast_kind=cast_kind, min_span_dbar=cfg.min_span_dbar,
-            corr_min=cfg.corr_min, motion_correct=cfg.motion_correct, mooring=cfg.mooring,
+            corr_min=cfg.corr_min, ens_start=ens_start, total=ens_stop,
+            motion_correct=cfg.motion_correct, mooring=cfg.mooring,
             source=cfg.ad2cp_path.name, progress=True)
         _stamp_provenance(DS, cfg)
         save_l2(DS, str(out))

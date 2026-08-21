@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,10 +63,84 @@ class Config:
         return self.output_dir / "L3" / f"{self._l3name}_interp.nc"
 
 
-def load_config(path=None) -> Config:
+CONFIG_NAME = "config_ctd.json"
+
+
+class AmbiguousConfigError(RuntimeError):
+    """An ambiguous config path was not confirmed, so nothing was loaded."""
+
+
+def _describe(p: Path) -> str:
+    """One-line 'which deployment is this?' summary, for a confirmation prompt."""
+    try:
+        with open(p) as f:
+            cfg = json.load(f)
+        return f"{cfg.get('mooring') or '(no mooring)'}  ->  {cfg.get('rsk_file') or '(no raw file)'}"
+    except Exception:
+        return "(could not be read as JSON)"
+
+
+def _require_agreement(warning: str, assume_yes: bool) -> None:
+    """Warn, then continue only on explicit agreement.
+
+    A relative path is resolved against the *process* working directory, so the same
+    `config_ctd.json` names a different deployment depending on where the shell
+    happens to be — and the run then succeeds against the wrong raw file with no
+    error. (Mirrors `ww_sig1000.config`; the two packages stay independent.)
+    """
+    print(warning, file=sys.stderr, flush=True)
+    if assume_yes:
+        print("  Proceeding (--yes).", file=sys.stderr, flush=True)
+        return
+    if not sys.stdin.isatty():
+        raise AmbiguousConfigError(
+            "Refusing to guess: no terminal is attached, so this cannot be confirmed.\n"
+            "Re-run with an absolute --config, or pass --yes to accept the path above.")
+    try:
+        answer = input("  Proceed with this config? [y/N] ")
+    except (EOFError, KeyboardInterrupt):      # stdin closed, or Ctrl-C/Ctrl-D
+        raise AmbiguousConfigError("\nAborted at the config-path confirmation.") from None
+    if answer.strip().lower() not in ("y", "yes"):
+        raise AmbiguousConfigError("Aborted at the config-path confirmation.")
+
+
+def _resolve_config(path=None, assume_yes: bool = False) -> Path:
+    """Explicit `path`, else `$WW_CONFIG`, else a `config_ctd.json` in the working
+    directory or at the repo root. Ambiguous cases need explicit agreement."""
+    for raw, source in ((path, "--config"),
+                        (None if path else os.environ.get("WW_CONFIG"), "$WW_CONFIG")):
+        if not raw:
+            continue
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+            _require_agreement(
+                f"WARNING: {source} {str(raw)!r} is a relative path, resolved against the\n"
+                f"  current working directory ({Path.cwd()}).\n"
+                f"  If the cwd is not what you expect this loads another deployment.\n"
+                f"  It resolves to : {p}\n"
+                f"  which contains : {_describe(p) if p.exists() else '(missing)'}",
+                assume_yes)
+        return p
+
+    here = (Path.cwd() / CONFIG_NAME).resolve()
+    repo = (_HERE.parent / CONFIG_NAME).resolve()
+    found = [p for p in dict.fromkeys((here, repo)) if p.exists()]
+    if len(found) > 1:
+        _require_agreement(
+            f"WARNING: two different {CONFIG_NAME} files are in play:\n"
+            f"  [chosen] {found[0]}\n           {_describe(found[0])}\n"
+            f"  [other ] {found[1]}\n           {_describe(found[1])}\n"
+            f"  The working-directory one is about to be used.",
+            assume_yes)
+    return found[0] if found else repo
+
+
+def load_config(path=None, assume_yes: bool = False) -> Config:
     """Load the JSON config into a `Config` (explicit `path`, else `$WW_CONFIG`,
-    else `config_ctd.json` at the repo root). `$WW_RSK` / `$WW_OUTPUT_DIR` override paths."""
-    p = Path(path or os.environ.get("WW_CONFIG") or _HERE.parent / "config_ctd.json").expanduser()
+    else `config_ctd.json` in the cwd or at the repo root). `$WW_RSK` /
+    `$WW_OUTPUT_DIR` override paths. Ambiguous paths need explicit agreement."""
+    p = _resolve_config(path, assume_yes=assume_yes)
     if not p.exists():
         raise FileNotFoundError(
             f"config not found: {p}\nEdit config_ctd.json with your deployment paths and metadata.")
