@@ -301,6 +301,45 @@ binning, attitude is the term that survives. `classify()` therefore reports
 `ahrs_fault` before any attitude-derived label, since none of them mean anything on a
 bad solution.
 
+## Recovering tilt when the AHRS fails
+
+`ww_sig1000/attitude.py` rebuilds `pitch`/`roll` from the raw accelerometer, for the
+casts `platform.cast_qc` flags. It is worth doing because the raw sensors stay healthy
+through the fault — on NOPP_d2 the accelerometer measured clean gravity in 100% of the
+941 faulted casts.
+
+```python
+from ww_sig1000.attitude import apply_to, reconstruct
+sub, rec = apply_to(ds, cast_slice)      # copy with pitch/roll replaced
+rec.usable                               # lowpass_valid and accel_is_gravity
+```
+
+**Result on the trigger fault** (2024-05-02 09:41, AHRS error 42.9°): velE roughness
+0.1119 → **0.0195** against a healthy reference of 0.0185, and mean velU
+**+0.1371 → +0.0042 m/s**. The AHRS version implies a sustained 0.137 m/s upward ocean
+velocity, which cannot happen; the reconstruction does not. velU is the load-bearing
+test here precisely because nothing is fitted to it.
+
+On healthy casts reconstruction is near-neutral — bias ≈ 0 (±0.03° in pitch and roll),
+up-vector offset 0.388° (a 0.0030 m/s leak), 8× lower per-ping noise, and roughness
+0.0185 → 0.0214. That 16% penalty is the cost of filtering out real wave-band attitude.
+
+**Why low-pass at 0.03 Hz**: in the wave band the accelerometer measures gravity *plus*
+wave acceleration and the two are inseparable, so filtering below it is the only
+defensible choice — not merely noise reduction. What that discards is attitude wobble
+we cannot recover from the accelerometer at all (~1° rms), and it averages out in
+binned products.
+
+**Validity guard**: low-passing gravity in the instrument frame is only legal while the
+vehicle is near-upright. On a genuinely tilted vehicle, spin sweeps gravity around the
+instrument frame and the filter would smear real attitude. `reconstruct` reports
+`lowpass_valid`, `accel_is_gravity` and `highfreq_fraction` so this is checked.
+
+Heading reconstruction (Stage 2, from the tilt-compensated magnetometer) is **not built
+yet**. Tilt is the damaging term — it leaks the platform's 0.45 m/s ascent into the
+horizontal — whereas a heading error only rotates the horizontal vector without changing
+its magnitude.
+
 ## Validation (ADCP)
 
 Turbulence ε is validated against the published `NortekTurbulenceData.nc` (Dryad DA_final).
