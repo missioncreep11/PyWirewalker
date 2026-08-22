@@ -13,14 +13,43 @@ import time as _time
 import numpy as np
 import xarray as xr
 
+from .attitude import DEFAULT_CUTOFF_HZ, reconstruct
 from .casts import detect_casts
 from .geometry import look_direction
+from .platform import AHRS_BAD_DEG, ahrs_error
 from .velocity import process_cast, output_grid
+
+ATTITUDE_MODES = ("ahrs", "reconstructed", "auto")
+
+
+def _cast_attitude(dsc, mode):
+    """Choose the attitude source for one cast.
+
+    Returns ``(dsc, source_flag, ahrs_error_deg)`` where the flag is
+    0 = AHRS pitch/roll used as-is, 1 = replaced by the accel reconstruction,
+    2 = replacement wanted but the reconstruction was not usable, AHRS kept.
+
+    ``auto`` substitutes only on detector-flagged casts (`ahrs_error` >=
+    `platform.AHRS_BAD_DEG`); ``reconstructed`` substitutes everywhere it is valid.
+    The error is computed in every mode so the product always carries the QC.
+    """
+    err = np.nan
+    if "accel" in dsc and "orientmat" in dsc:
+        err = ahrs_error(dsc["accel"].values, dsc["orientmat"].values)
+    if mode == "ahrs" or "accel" not in dsc:
+        return dsc, 0, err
+    if mode == "auto" and not (np.isfinite(err) and err >= AHRS_BAD_DEG):
+        return dsc, 0, err
+    rec = reconstruct(dsc)
+    if not rec.usable:
+        return dsc, 2, err
+    return dsc.assign(pitch=("time", rec.pitch_deg),
+                      roll=("time", rec.roll_deg)), 1, err
 
 
 def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_samples,
-              motion_correct, mooring, source):
-    """Stack a list of (cast_result, Cast) into an L2 xarray.Dataset."""
+              motion_correct, mooring, source, attitude="ahrs"):
+    """Stack a list of (cast_result, Cast, att_src, ahrs_err) into an L2 xarray.Dataset."""
     zc = output_grid(boxsize, z_max)
     nz, ncast = zc.size, len(results)
     G = {k: np.full((nz, ncast), np.nan, np.float32) for k in ("velE", "velN", "velU", "amp")}
@@ -30,7 +59,9 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
     cpmin = np.zeros(ncast)
     cdir = np.zeros(ncast, np.int8)
     ccomplete = np.zeros(ncast, np.int8)
-    for j, (g, cast) in enumerate(results):
+    csrc = np.zeros(ncast, np.int8)
+    cerr = np.full(ncast, np.nan)
+    for j, (g, cast, src, err) in enumerate(results):
         for k in G:
             G[k][:, j] = g[k]
         nobs[:, j] = g["n_obs"]
@@ -39,12 +70,15 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
         cpmin[j] = g["pressure_min"]
         cdir[j] = 1 if cast.direction == "up" else 0
         ccomplete[j] = 0 if cast.truncated else 1
+        csrc[j] = src
+        cerr[j] = err
 
     order = np.argsort(ctime)                      # ensure time order
     for k in G:
         G[k] = G[k][:, order]
     nobs, ctime, cdir = nobs[:, order], ctime[order], cdir[order]
     cpmax, cpmin, ccomplete = cpmax[order], cpmin[order], ccomplete[order]
+    csrc, cerr = csrc[order], cerr[order]
     n_trunc = int((ccomplete == 0).sum())
 
     return xr.Dataset(
@@ -68,11 +102,35 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                                       "comment": "0 = clipped by a duty-cycle burst boundary "
                                                  "or the record edge, so the cast covers only "
                                                  "part of the profile; 1 = bounded by pressure "
-                                                 "turning points"})},
+                                                 "turning points"}),
+                "attitude_source": ("cast", csrc,
+                                    {"long_name": "pitch/roll source for this cast",
+                                     "flag_values": np.array([0, 1, 2], np.int8),
+                                     "flag_meanings": "ahrs accel_reconstructed ahrs_fallback",
+                                     "comment": "0 = AHRS pitch/roll; 1 = replaced by the "
+                                                "low-passed accelerometer tilt (heading "
+                                                "remains AHRS); 2 = replacement requested "
+                                                "but the reconstruction was not usable "
+                                                "(vehicle too tilted or |a| != g), AHRS "
+                                                "kept - treat this cast's velocity as "
+                                                "suspect"}),
+                "ahrs_error_deg": ("cast", cerr.astype(np.float32),
+                                   {"units": "degrees",
+                                    "long_name": "median angle between AHRS up and measured gravity",
+                                    "comment": f"per-cast AHRS attitude-fault statistic "
+                                               f"(ww_sig1000.platform.ahrs_error); healthy "
+                                               f"casts sit at 4-7 deg, >= {AHRS_BAD_DEG:g} "
+                                               f"deg means the orientation solution is not "
+                                               f"trustworthy"})},
         attrs={"title": f"{mooring} Wirewalker ADCP L2 (gridded velocity)",
                "mooring": mooring, "source_file": source,
                "instrument_look": look, "cast_kind": cast_kind,
                "n_casts_truncated": n_trunc,
+               "attitude_mode": attitude,
+               "n_casts_attitude_reconstructed": int((csrc == 1).sum()),
+               "n_casts_attitude_fallback": int((csrc == 2).sum()),
+               "attitude_reconstruction": (f"accel lowpass {DEFAULT_CUTOFF_HZ:g} Hz "
+                                           f"(ww_sig1000.attitude)"),
                "grid_boxsize_m": boxsize, "grid_z_max_m": z_max,
                "corr_min": corr_min, "min_bin_samples": min_bin_samples,
                "motion_correction": ("WWcorr_beam (bandpass-integrated IMU + dp/dt)"
@@ -89,8 +147,10 @@ def _select_casts(press, t_s, fs, kinds, thhold_s, min_span_dbar):
 
 def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.0,
              corr_min=50, min_bin_samples=10, thhold_s=30.0, motion_correct=True,
-             mooring="", source=""):
+             attitude="ahrs", mooring="", source=""):
     """Grid substantial casts of an in-memory Dataset into an L2 Dataset."""
+    if attitude not in ATTITUDE_MODES:
+        raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
     fs = float(ds.attrs["fs"])
     t_s = ds["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
     press = ds["pressure"].values
@@ -102,13 +162,17 @@ def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.
     casts = _select_casts(press, t_s, fs, kinds, thhold_s, min_span_dbar)
     if not casts:
         raise RuntimeError(f"no {cast_kind}-casts with span >= {min_span_dbar} dbar found")
-    results = [(process_cast(ds.isel(time=slice(c.start, c.stop + 1)), corr_min=corr_min,
-                             boxsize=boxsize, z_max=z_max, direction=look,
-                             min_bin_samples=min_bin_samples, motion_correct=motion_correct),
-                c) for c in casts]
+    results = []
+    for c in casts:
+        dsc, src, err = _cast_attitude(ds.isel(time=slice(c.start, c.stop + 1)), attitude)
+        g = process_cast(dsc, corr_min=corr_min, boxsize=boxsize, z_max=z_max,
+                         direction=look, min_bin_samples=min_bin_samples,
+                         motion_correct=motion_correct)
+        results.append((g, c, src, err))
     return _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                      corr_min=corr_min, min_bin_samples=min_bin_samples,
-                     motion_correct=motion_correct, mooring=mooring, source=source)
+                     motion_correct=motion_correct, mooring=mooring, source=source,
+                     attitude=attitude)
 
 
 def _count_ensembles(fn, reader):
@@ -147,7 +211,7 @@ def _count_ensembles(fn, reader):
 def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, boxsize=1.0,
                        z_max=None, cast_kind="both", min_span_dbar=40.0, corr_min=50,
                        min_bin_samples=10, thhold_s=30.0, gap_s=30.0, motion_correct=True,
-                       mooring="", source="", progress=True):
+                       attitude="ahrs", mooring="", source="", progress=True):
     """Grid a raw `.ad2cp` too large for memory. `reader` is dolfyn.read.
 
     Reads the file in `chunk`-ensemble windows, detects/grids casts on a rolling
@@ -157,7 +221,15 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
     `ens_start` / `total` bound the ensemble range, so the deployment/recovery
     transit — when the vehicle is on deck or being lowered and is not profiling —
     can be trimmed off rather than entering the product as spurious casts.
+
+    `attitude` selects the pitch/roll source per cast (see `_cast_attitude`):
+    "ahrs" uses the instrument's fused solution as-is, "reconstructed" replaces it
+    with the low-passed accelerometer tilt wherever that is valid, and "auto"
+    replaces it only on casts the AHRS-fault detector flags. The choice and the
+    per-cast outcome are recorded in the product.
     """
+    if attitude not in ATTITUDE_MODES:
+        raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
     if total is None:
         total = _count_ensembles(fn, reader)
     kinds = ("up", "down") if cast_kind == "both" else (cast_kind,)
@@ -192,10 +264,12 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
         to_do = casts[:-1] if (last and casts) else casts
         for c in to_do:
             if c.direction in kinds and np.ptp(press[c.start:c.stop + 1]) >= min_span_dbar:
-                g = process_cast(buf.isel(time=slice(c.start, c.stop + 1)), corr_min=corr_min,
+                dsc, src, err = _cast_attitude(buf.isel(time=slice(c.start, c.stop + 1)),
+                                               attitude)
+                g = process_cast(dsc, corr_min=corr_min,
                                  boxsize=boxsize, z_max=z_max, direction=look,
                                  min_bin_samples=min_bin_samples, motion_correct=motion_correct)
-                results.append((g, c))
+                results.append((g, c, src, err))
         # carry the tail (from the start of the held-back cast) into the next chunk,
         # remembering whether a real gap clipped its start (unknowable next chunk)
         if last and casts:
@@ -220,7 +294,8 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
 
     ds = _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                    corr_min=corr_min, min_bin_samples=min_bin_samples,
-                   motion_correct=motion_correct, mooring=mooring, source=source)
+                   motion_correct=motion_correct, mooring=mooring, source=source,
+                   attitude=attitude)
     ds.attrs["ensemble_range"] = f"{int(ens_start)}:{int(total)}"
     return ds
 

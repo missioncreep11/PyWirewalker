@@ -314,6 +314,20 @@ sub, rec = apply_to(ds, cast_slice)      # copy with pitch/roll replaced
 rec.usable                               # lowpass_valid and accel_is_gravity
 ```
 
+It is wired into the velocity driver as `--attitude {ahrs,reconstructed,auto}` (or
+`velocity.attitude` in the config; default `ahrs`, which leaves existing products
+bit-identical). `auto` substitutes only on casts the fault detector flags
+(`ahrs_error ≥ 15°`) and keeps the AHRS when the reconstruction's own validity guard
+fails. Every L2 now carries two per-cast QC coordinates regardless of mode:
+`ahrs_error_deg` (the detector statistic) and `attitude_source`
+(0 = AHRS, 1 = accel-reconstructed, 2 = fallback — substitution wanted but invalid,
+so that cast's velocity is suspect).
+
+```bash
+python process_ww_sig1000.py --product velocity --attitude auto \
+    --config /abs/path/config_adcp.json
+```
+
 **Result on the trigger fault** (2024-05-02 09:41, AHRS error 42.9°): velE roughness
 0.1119 → **0.0195** against a healthy reference of 0.0185, and mean velU
 **+0.1371 → +0.0042 m/s**. The AHRS version implies a sustained 0.137 m/s upward ocean

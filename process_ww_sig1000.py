@@ -55,6 +55,10 @@ def main():
     ap.add_argument("--min-span-dbar", type=float, default=None, help="min cast pressure span")
     ap.add_argument("--corr-min", type=int, default=None, help="beam correlation threshold")
     ap.add_argument("--no-motion", action="store_true", help="[velocity] disable IMU motion correction")
+    ap.add_argument("--attitude", default=None, choices=["ahrs", "reconstructed", "auto"],
+                    help="[velocity] pitch/roll source: the AHRS fusion, the accel-derived "
+                         "reconstruction, or auto (reconstruct only on AHRS-faulted casts); "
+                         "recorded per cast in the product (default ahrs)")
     ap.add_argument("--mooring", default=None, help="mooring/deployment name for metadata")
     ap.add_argument("--start-ensemble", type=int, default=None,
                     help="first ensemble to process (trims deployment transit)")
@@ -95,6 +99,8 @@ def main():
         cfg.corr_min = args.corr_min
     if args.no_motion:
         cfg.motion_correct = False
+    if args.attitude is not None:
+        cfg.attitude = args.attitude
     # A CLI bound overrides the config's *other* form of the same bound too —
     # otherwise a `start_time`/`end_time` in the config silently wins over the
     # ensemble flag the user just typed (resolve_trim gives times precedence).
@@ -140,12 +146,16 @@ def main():
             str(cfg.ad2cp_path), dolfyn.read, chunk=cfg.chunk, boxsize=cfg.boxsize_m,
             z_max=cfg.z_max_m, cast_kind=cast_kind, min_span_dbar=cfg.min_span_dbar,
             corr_min=cfg.corr_min, ens_start=ens_start, total=ens_stop,
-            motion_correct=cfg.motion_correct, mooring=cfg.mooring,
-            source=cfg.ad2cp_path.name, progress=True)
+            motion_correct=cfg.motion_correct, attitude=cfg.attitude,
+            mooring=cfg.mooring, source=cfg.ad2cp_path.name, progress=True)
         _stamp_provenance(DS, cfg)
         save_l2(DS, str(out))
+        att = (f", attitude={cfg.attitude}: "
+               f"{DS.attrs['n_casts_attitude_reconstructed']} reconstructed, "
+               f"{DS.attrs['n_casts_attitude_fallback']} fallback"
+               if cfg.attitude != "ahrs" else "")
         print(f"[done] {DS.sizes['cast']} casts x {DS.sizes['depth']} depths "
-              f"(look={DS.attrs['instrument_look']}) -> {out} in {time.time()-t0:.0f}s")
+              f"(look={DS.attrs['instrument_look']}{att}) -> {out} in {time.time()-t0:.0f}s")
 
 
 def _stamp_provenance(ds, cfg):
