@@ -18,7 +18,7 @@ import numpy as np
 
 from .transforms import beam2enu
 from .geometry import cell_depths
-from .motion import beam_motion_correction
+from .motion import beam_motion_correction, beam_motion_correction_v2
 
 
 def output_grid(boxsize: float, z_max: float) -> np.ndarray:
@@ -38,11 +38,17 @@ def _nominal_depth_grid(pressure, n_cells, cell_size, blank_dist, direction):
 
 def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
                  min_bin_samples=10, cell_size=None, blank_dist=None, beam_angle=None,
-                 motion_correct=True):
+                 motion_correct=True, motion="v1"):
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
     Returns dict with keys velE, velN, velU, amp, corr_mean, n_obs (each (nz,)),
     plus scalars time (datetime64), pressure_max, pressure_min, and the depth grid `z`.
+
+    ``motion="v2"`` uses the buoyant-ascent correction (`beam_motion_correction_v2`):
+    its low-passed accel tilt then replaces the AHRS pitch/roll in *every* rotation
+    (cell depths, beam->ENU, and the correction itself), spike pings are excluded
+    from the bin averages, and the result records ``tilt_source``. When the v2 tilt
+    guard fails the cast falls back to the v1 path (``tilt_source = "ahrs_fallback"``).
     """
     a = dsc.attrs
     cs = a["cell_size"] if cell_size is None else cell_size
@@ -57,6 +63,20 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     head = dsc["heading"].values
     press = dsc["pressure"].values
     nb, nc, npg = vel.shape
+
+    # v2 motion model: attitude and correction come from the raw sensors together
+    v2 = None
+    tilt_source = None
+    if motion == "v2" and "accel" in dsc:
+        ts_v2 = dsc["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
+        v2 = beam_motion_correction_v2(ts_v2, press, dsc["accel"].values, head,
+                                       float(a["fs"]), beam_angle=ba)
+        if v2.usable:
+            pitch, roll = v2.pitch_deg, v2.roll_deg
+            tilt_source = "lp_accel"
+        else:
+            v2 = None
+            tilt_source = "ahrs_fallback"
 
     # 1. correlation mask: any beam below threshold at a (cell, ping) -> drop all beams there
     bad = (corr < corr_min).any(axis=0)        # (range, time)
@@ -83,7 +103,10 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
             eq_vel[b, :, n] = np.interp(tgt, zc[o], v[o], left=np.nan, right=np.nan)
 
     # 3b. platform-motion correction: add the platform's along-beam velocity
-    if motion_correct and "accel" in dsc:
+    if motion_correct and v2 is not None:
+        eq_vel = eq_vel + v2.corr_beam[:, None, :]                 # broadcast over cells
+        eq_vel[:, :, ~v2.ping_ok] = np.nan                         # spike pings excluded
+    elif motion_correct and "accel" in dsc:
         ts = dsc["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
         corr_beam, _ = beam_motion_correction(
             ts, press, dsc["accel"].values, pitch, roll, head, float(a["fs"]), beam_angle=ba)
@@ -119,4 +142,6 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     out["time"] = t[t.size // 2]
     out["pressure_max"] = float(np.nanmax(press))
     out["pressure_min"] = float(np.nanmin(press))
+    if tilt_source is not None:
+        out["tilt_source"] = tilt_source
     return out

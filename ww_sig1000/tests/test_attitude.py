@@ -9,9 +9,9 @@ import pytest
 import xarray as xr
 
 from ww_sig1000.attitude import (
-    DEFAULT_CUTOFF_HZ, TILT_LOWPASS_MAX_DEG, apply_to, compare_with_pipeline,
-    gravity_direction, highfreq_fraction, noise_vs_cutoff, pitch_roll_from_up,
-    reconstruct, up_from_pitch_roll,
+    DEFAULT_CUTOFF_HZ, LOWPASS_SMEAR_MAX_DEG, apply_to, compare_with_pipeline,
+    gravity_direction, highfreq_fraction, lowpass_smear_deg, noise_vs_cutoff,
+    pitch_roll_from_up, reconstruct, up_from_pitch_roll,
 )
 from ww_sig1000.platform import G
 from ww_sig1000.transforms import _tilt_heading_matrix
@@ -97,12 +97,35 @@ def test_flags_when_the_accelerometer_is_not_measuring_gravity():
     assert not rec.usable
 
 
-def test_flags_when_the_vehicle_is_too_tilted_for_lowpassing():
-    """A genuinely tilted vehicle sweeps gravity through the instrument frame."""
-    rec = reconstruct(_ds(TILT_LOWPASS_MAX_DEG + 20.0, 0.0))
+def test_a_steady_lean_is_lowpass_valid_even_when_large():
+    """The guard measures the filter's error, not the tilt: a 13-deg steady lean
+    (observed on NOPP_d2 after the June current increase) low-passes cleanly."""
+    rec = reconstruct(_ds(13.0, 0.0))
+    assert rec.lowpass_valid
+    assert rec.lowpass_smear_deg < 1.0
+    assert np.median(rec.tilt_deg) == pytest.approx(13.0, abs=0.2)
+
+
+def test_fast_coning_is_flagged_as_unfilterable():
+    """Gravity sweeping a wide cone above the cutoff is exactly what the low-pass
+    would smear - the guard must catch it."""
+    n = 4000
+    t = np.arange(n) / FS
+    pitch = 15.0 * np.sin(2 * np.pi * 0.2 * t)     # 0.2 Hz >> 0.03 Hz cutoff
+    roll = 15.0 * np.cos(2 * np.pi * 0.2 * t)
+    rec = reconstruct(_ds(pitch, roll, n=n))
+    assert rec.lowpass_smear_deg > LOWPASS_SMEAR_MAX_DEG
     assert not rec.lowpass_valid
     assert not rec.usable
     assert reconstruct(_ds(3.0, -2.0)).lowpass_valid
+
+
+def test_lowpass_smear_matches_the_cone_angle():
+    n = 4000
+    t = np.arange(n) / FS
+    ds = _ds(10.0 * np.sin(2 * np.pi * 0.3 * t), 10.0 * np.cos(2 * np.pi * 0.3 * t), n=n)
+    smear = lowpass_smear_deg(ds["accel"].values, FS)
+    assert smear == pytest.approx(10.0, abs=0.5)
 
 
 def test_highfreq_fraction_detects_real_attitude_change_above_the_cutoff():

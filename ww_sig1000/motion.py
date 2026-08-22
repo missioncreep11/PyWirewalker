@@ -1,11 +1,34 @@
 """Wirewalker platform-motion correction for a downward-looking Signature ADCP.
 
-Port of ``WWcorr_beam.m`` (Bofu Zheng). Estimates the platform's translational
-velocity from the IMU (bandpass-integrated dynamic acceleration) plus the
-pressure-derived vertical rate, and returns the per-ping, per-beam correction to
-add to the measured beam velocities so they become water-relative-to-earth.
+Two generations:
+
+``beam_motion_correction`` (v1) is a port of ``WWcorr_beam.m`` (Bofu Zheng):
+platform velocity from bandpass-integrated IMU acceleration (all three axes,
+rotated with the per-ping AHRS attitude) plus the pressure-derived vertical rate.
+
+``beam_motion_correction_v2`` is optimized for the Wirewalker's buoyant-ascent
+upcast, following the NOPP_d2 diagnosis (21 raw upcasts, depth-banded wave-band
+variance accounting):
+
+- **Vertical from pressure alone.** On the upcast the vehicle is mechanically
+  decoupled from the heaving surface buoy, so there is no wave-band vertical
+  platform motion for the IMU to measure; the v1 IMU-vertical term only injected
+  noise (wave-band velU rms 0.156 m/s with it vs 0.084 without, in the top 50 m).
+- **Rotation with low-passed accelerometer tilt**, never the AHRS fusion. Real
+  wave-band tilt at depth is < 0.1 deg (gyro), while the AHRS carries ~0.3 deg of
+  in-band tilt noise - and fails outright on 15.7% of casts. Using the accel tilt
+  makes the correction immune to AHRS faults by construction: on the 2024-05-02
+  fault cast it cut wave-band velE rms from 0.13-0.14 to 0.036-0.040 m/s.
+- **Horizontal IMU correction gated by depth.** Wire-transmitted lateral shaking
+  is real near the surface (in-band accel 0.22 m/s2 at 0-50 m) and gone by 150 m
+  (flat 0.01 m/s2 sensor floor below), so the bandpass-integrated horizontal
+  term tapers to zero across `H_GAIN_FULL_M`..`H_GAIN_ZERO_M`.
+- **Spike pings are interpolated over and flagged** (`ping_ok`) instead of the
+  v1 zeroing, which turned each spike into a step in the integrated velocity.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.signal import butter, filtfilt, detrend
@@ -14,6 +37,12 @@ from .transforms import xyz2enu, get_unit_vectors
 from .geometry import BEAM_PHI_DEG, BEAM_AZI_DEG
 
 G = 9.81  # m s-2
+
+# v2 horizontal-correction depth gate (dbar ~ m), from the measured decay of
+# wire-transmitted wave-band acceleration on NOPP_d2.
+H_GAIN_FULL_M = 100.0    # full weight above this depth
+H_GAIN_ZERO_M = 180.0    # zero weight below this depth
+SPIKE_TOL = 0.3 * G      # |a| further than this from g = not a usable ping
 
 
 def _bandpass_reflect(x, fs, lo=0.1, hi=1.2, order=1):
@@ -90,3 +119,91 @@ def beam_motion_correction(time_s, pressure, accel_xyz, pitch, roll, heading, fs
         bX, bY, bZ = (float(v) for v in get_unit_vectors(phi, azi[b], 0.0, 0.0))
         corr_beam[b] = vel_xyz[0] * bX + vel_xyz[1] * bY + vel_xyz[2] * bZ
     return corr_beam, platform_enu
+
+
+# --------------------------------------------------------------------------- #
+# v2: buoyant-ascent model
+# --------------------------------------------------------------------------- #
+@dataclass
+class MotionV2:
+    """v2 correction plus the attitude it used and per-ping validity."""
+    corr_beam: np.ndarray       # (4, n) velocity to ADD to measured beam velocities
+    platform_enu: np.ndarray    # (3, n) estimated platform velocity [E, N, Up]
+    pitch_deg: np.ndarray       # LP-accel tilt actually used for every rotation -
+    roll_deg: np.ndarray        # the caller must use the same for beam2enu/cell_depths
+    ping_ok: np.ndarray         # (n,) False where |a| was a spike (interpolated over)
+    h_gain: np.ndarray          # (n,) depth gate applied to the horizontal term
+    usable: bool                # tilt guard + gravity check passed
+
+
+def _depth_gain(pressure, full_m=H_GAIN_FULL_M, zero_m=H_GAIN_ZERO_M):
+    """Cosine taper 1 -> 0 across the depth band where wire-transmitted wave-band
+    motion dies out."""
+    p = np.asarray(pressure, float)
+    x = np.clip((p - full_m) / (zero_m - full_m), 0.0, 1.0)
+    return 0.5 * (1.0 + np.cos(np.pi * x))
+
+
+def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *,
+                              beam_angle=25.0, tilt_cutoff_hz=None,
+                              h_full_m=H_GAIN_FULL_M, h_zero_m=H_GAIN_ZERO_M) -> MotionV2:
+    """Per-ping platform-velocity correction for the buoyant-ascent upcast.
+
+    Note the signature: the AHRS pitch/roll are *not* inputs. Tilt comes from the
+    low-passed accelerometer (``attitude.gravity_direction``), so an AHRS attitude
+    fault cannot enter the correction. Heading still comes from the AHRS (a heading
+    error rotates the horizontal correction without changing its magnitude).
+
+    Returns a `MotionV2`; when ``usable`` is False (vehicle too tilted for the
+    low-pass to be legal, or the accelerometer is not measuring gravity) the caller
+    should fall back to the v1 path rather than trust these fields.
+    """
+    from .attitude import (DEFAULT_CUTOFF_HZ, LOWPASS_SMEAR_MAX_DEG,
+                           gravity_direction, lowpass_smear_deg, pitch_roll_from_up)
+    from .platform import ACCEL_TOL
+
+    cutoff = DEFAULT_CUTOFF_HZ if tilt_cutoff_hz is None else tilt_cutoff_hz
+    acc = np.asarray(accel_xyz, float).copy()
+    n = acc.shape[1]
+    dt = 1.0 / fs
+
+    # spikes: interpolate over them (v1 zeroed them, turning each into a velocity
+    # step after integration) and flag the pings for the caller to exclude
+    mag = np.linalg.norm(acc, axis=0)
+    spike = np.abs(mag - G) > SPIKE_TOL
+    ping_ok = ~spike
+    if spike.any() and ping_ok.any():
+        idx = np.arange(n)
+        for i in range(3):
+            acc[i, spike] = np.interp(idx[spike], idx[ping_ok], acc[i, ping_ok])
+
+    # tilt from the low-passed gravity direction; guard as in attitude.reconstruct
+    u = gravity_direction(acc, fs, cutoff)
+    pitch, roll = pitch_roll_from_up(u)
+    usable = bool(lowpass_smear_deg(acc, fs, cutoff, u_lp=u) < LOWPASS_SMEAR_MAX_DEG
+                  and abs(np.median(mag[ping_ok]) - G) < ACCEL_TOL) if ping_ok.any() else False
+
+    # horizontal: bandpass-integrated earth-frame acceleration, depth-gated.
+    # (no IMU vertical term at all - on the upcast dp/dt is the vertical motion)
+    aENU = xyz2enu(acc[:, None, :], heading, pitch, roll)[:, 0, :]
+    acu = _bandpass_reflect(aENU[0], fs)
+    acv = _bandpass_reflect(aENU[1], fs)
+    WWu = np.zeros(n)
+    WWv = np.zeros(n)
+    WWu[1:] = np.cumsum(acu[:-1] * dt)
+    WWv[1:] = np.cumsum(acv[:-1] * dt)
+    gain = _depth_gain(pressure, h_full_m, h_zero_m)
+
+    dpw = _lowpass_reflect(np.gradient(np.asarray(pressure, float), dt), fs, fc=0.3)
+    platform_enu = np.vstack([gain * WWu, gain * WWv, -dpw])
+
+    vel_xyz = xyz2enu(platform_enu[:, None, :], heading, pitch, roll, reverse=True)[:, 0, :]
+    phi = np.deg2rad(90.0 - beam_angle)     # geometry phi is elevation from horizontal
+    azi = np.deg2rad(np.asarray(BEAM_AZI_DEG, float))
+    corr_beam = np.empty((4, n))
+    for b in range(4):
+        bX, bY, bZ = (float(v) for v in get_unit_vectors(phi, azi[b], 0.0, 0.0))
+        corr_beam[b] = vel_xyz[0] * bX + vel_xyz[1] * bY + vel_xyz[2] * bZ
+    return MotionV2(corr_beam=corr_beam, platform_enu=platform_enu,
+                    pitch_deg=pitch, roll_deg=roll, ping_ok=ping_ok,
+                    h_gain=gain, usable=usable)

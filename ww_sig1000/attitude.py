@@ -11,13 +11,15 @@ The accelerometer measures gravity *plus* the vehicle's own acceleration. Wave-b
 motion (0.05-0.5 Hz) is the dominant contaminant, so low-passing well below it isolates
 the gravity direction and sharply reduces tilt noise.
 
-That is only valid while the vehicle is **near upright**. Gravity's direction *in the
-instrument frame* is what gets filtered, and on an upright vehicle that direction barely
-moves even as the vehicle spins — so filtering removes noise and nothing else. On a
-genuinely tilted vehicle, spin sweeps gravity around the instrument frame at the spin
-rate, and a low-pass would smear real attitude. `reconstruct` reports `lowpass_valid`
-and the fraction of gravity-direction variance sitting above the cutoff, so the
-assumption is checked rather than assumed.
+That is only valid while the filter is not smearing *real* attitude motion. On a
+leaning vehicle, spin precesses gravity around the instrument frame at the spin rate —
+but observed Wirewalker spin (4-30 mHz) sits at or below the cutoff, so the precession
+passes through the filter and even a 13-deg steady lean low-passes cleanly. What must
+be caught is motion of the gravity direction *above* the cutoff. `reconstruct`
+therefore measures the error directly: `lowpass_smear_deg`, the median angle between
+the raw and low-passed gravity directions, gates `lowpass_valid` (with
+`highfreq_fraction` kept as a diagnostic), so the assumption is checked per cast
+rather than assumed.
 
 Frame
 -----
@@ -40,9 +42,15 @@ import numpy as np
 
 from .platform import ACCEL_TOL, G, _filt
 
-# Above this tilt, low-passing gravity in the instrument frame is no longer safe:
-# spin starts sweeping gravity through the instrument frame fast enough to be filtered.
-TILT_LOWPASS_MAX_DEG = 10.0
+# Validity guard: the low-pass is legal when the error it introduces is small,
+# measured directly as the median angle between the raw and low-passed gravity
+# directions. On NOPP_d2 every real upcast sits at 0.2-1.8 deg (including casts
+# leaning a genuine 13 deg with spin at ~20 mHz, which the old tilt-based guard
+# wrongly rejected - 29% of the record after the June current increase leaned
+# >10 deg); a genuinely fast-coning vehicle would show tens of degrees. The spin
+# rates observed (4-30 mHz) sit at or below the cutoff, so a steady lean's
+# precession *passes* the filter rather than being smeared by it.
+LOWPASS_SMEAR_MAX_DEG = 5.0
 DEFAULT_CUTOFF_HZ = 0.03          # ~33 s; well below the 0.05-0.5 Hz wave band
 
 
@@ -90,7 +98,8 @@ class TiltReconstruction:
     accel_mag: np.ndarray
     cutoff_hz: float
     highfreq_fraction: float
-    lowpass_valid: bool             # vehicle near-upright, so filtering is safe
+    lowpass_smear_deg: float        # median angle(raw, low-passed) gravity direction
+    lowpass_valid: bool             # the low-pass introduces little error, so it is safe
     accel_is_gravity: bool          # |a| ~ g, so the accelerometer is measuring gravity
     n_bad_mag: int
 
@@ -104,10 +113,26 @@ class TiltReconstruction:
                 "roll_median_deg": float(np.median(self.roll_deg)),
                 "accel_mag_median": float(np.median(self.accel_mag)),
                 "highfreq_fraction": self.highfreq_fraction,
+                "lowpass_smear_deg": self.lowpass_smear_deg,
                 "lowpass_valid": self.lowpass_valid,
                 "accel_is_gravity": self.accel_is_gravity,
                 "usable": self.usable,
                 "cutoff_hz": self.cutoff_hz}
+
+
+def lowpass_smear_deg(accel, fs, cutoff_hz=DEFAULT_CUTOFF_HZ, u_lp=None) -> float:
+    """Median angle (deg) between the raw and low-passed gravity directions.
+
+    The error the low-pass actually introduces, real motion and noise combined —
+    the quantity that decides whether filtering is legal. Real upcasts sit at
+    0.2-1.8 deg; fast large-angle coning would sit at tens of degrees.
+    """
+    a = np.asarray(accel, float)
+    u_raw = a / np.maximum(np.linalg.norm(a, axis=0), 1e-9)
+    if u_lp is None:
+        u_lp = gravity_direction(a, fs, cutoff_hz)
+    cos = np.clip((u_raw * u_lp).sum(axis=0), -1.0, 1.0)
+    return float(np.median(np.rad2deg(np.arccos(cos))))
 
 
 def reconstruct(ds, sl=None, *, cutoff_hz=DEFAULT_CUTOFF_HZ) -> TiltReconstruction:
@@ -119,11 +144,13 @@ def reconstruct(ds, sl=None, *, cutoff_hz=DEFAULT_CUTOFF_HZ) -> TiltReconstructi
     u = gravity_direction(acc, fs, cutoff_hz)
     pitch, roll = pitch_roll_from_up(u)
     tilt = np.rad2deg(np.arccos(np.clip(u[2], -1.0, 1.0)))
+    smear = lowpass_smear_deg(acc, fs, cutoff_hz, u_lp=u)
     return TiltReconstruction(
         pitch_deg=pitch, roll_deg=roll, tilt_deg=tilt, up=u, accel_mag=mag,
         cutoff_hz=cutoff_hz,
         highfreq_fraction=highfreq_fraction(acc, fs, cutoff_hz),
-        lowpass_valid=bool(np.median(tilt) < TILT_LOWPASS_MAX_DEG),
+        lowpass_smear_deg=smear,
+        lowpass_valid=bool(smear < LOWPASS_SMEAR_MAX_DEG),
         accel_is_gravity=bool(abs(np.median(mag) - G) < ACCEL_TOL),
         n_bad_mag=int((np.abs(mag - G) > ACCEL_TOL).sum()))
 

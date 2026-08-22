@@ -20,6 +20,8 @@ from .platform import AHRS_BAD_DEG, ahrs_error
 from .velocity import process_cast, output_grid
 
 ATTITUDE_MODES = ("ahrs", "reconstructed", "auto")
+MOTION_VERSIONS = ("v1", "v2")
+_TILT_SOURCE_FLAG = {"ahrs": 0, "lp_accel": 1, "ahrs_fallback": 2}
 
 
 def _cast_attitude(dsc, mode):
@@ -48,7 +50,7 @@ def _cast_attitude(dsc, mode):
 
 
 def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_samples,
-              motion_correct, mooring, source, attitude="ahrs"):
+              motion_correct, mooring, source, attitude="ahrs", motion="v1"):
     """Stack a list of (cast_result, Cast, att_src, ahrs_err) into an L2 xarray.Dataset."""
     zc = output_grid(boxsize, z_max)
     nz, ncast = zc.size, len(results)
@@ -70,7 +72,9 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
         cpmin[j] = g["pressure_min"]
         cdir[j] = 1 if cast.direction == "up" else 0
         ccomplete[j] = 0 if cast.truncated else 1
-        csrc[j] = src
+        # motion v2 chooses the tilt inside process_cast; its report wins over
+        # the _cast_attitude decision when present
+        csrc[j] = _TILT_SOURCE_FLAG[g["tilt_source"]] if "tilt_source" in g else src
         cerr[j] = err
 
     order = np.argsort(ctime)                      # ensure time order
@@ -133,8 +137,12 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                                            f"(ww_sig1000.attitude)"),
                "grid_boxsize_m": boxsize, "grid_z_max_m": z_max,
                "corr_min": corr_min, "min_bin_samples": min_bin_samples,
-               "motion_correction": ("WWcorr_beam (bandpass-integrated IMU + dp/dt)"
-                                     if motion_correct else "none"),
+               "motion_version": motion,
+               "motion_correction": (
+                   "none" if not motion_correct
+                   else "v2: dp/dt vertical + depth-gated bandpass IMU horizontal, "
+                        "LP-accel tilt rotation, spike pings excluded" if motion == "v2"
+                   else "WWcorr_beam (bandpass-integrated IMU + dp/dt)"),
                "processing": "ww_sig1000 port of WW_Velocity_Processing_SWOT",
                "date_created": _time.strftime("%Y-%m-%dT%H:%M:%S")},
     )
@@ -147,10 +155,12 @@ def _select_casts(press, t_s, fs, kinds, thhold_s, min_span_dbar):
 
 def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.0,
              corr_min=50, min_bin_samples=10, thhold_s=30.0, motion_correct=True,
-             attitude="ahrs", mooring="", source=""):
+             attitude="ahrs", motion="v1", mooring="", source=""):
     """Grid substantial casts of an in-memory Dataset into an L2 Dataset."""
     if attitude not in ATTITUDE_MODES:
         raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
+    if motion not in MOTION_VERSIONS:
+        raise ValueError(f"motion must be one of {MOTION_VERSIONS}, got {motion!r}")
     fs = float(ds.attrs["fs"])
     t_s = ds["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
     press = ds["pressure"].values
@@ -167,12 +177,12 @@ def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.
         dsc, src, err = _cast_attitude(ds.isel(time=slice(c.start, c.stop + 1)), attitude)
         g = process_cast(dsc, corr_min=corr_min, boxsize=boxsize, z_max=z_max,
                          direction=look, min_bin_samples=min_bin_samples,
-                         motion_correct=motion_correct)
+                         motion_correct=motion_correct, motion=motion)
         results.append((g, c, src, err))
     return _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                      corr_min=corr_min, min_bin_samples=min_bin_samples,
                      motion_correct=motion_correct, mooring=mooring, source=source,
-                     attitude=attitude)
+                     attitude=attitude, motion=motion)
 
 
 def _count_ensembles(fn, reader):
@@ -211,7 +221,7 @@ def _count_ensembles(fn, reader):
 def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, boxsize=1.0,
                        z_max=None, cast_kind="both", min_span_dbar=40.0, corr_min=50,
                        min_bin_samples=10, thhold_s=30.0, gap_s=30.0, motion_correct=True,
-                       attitude="ahrs", mooring="", source="", progress=True):
+                       attitude="ahrs", motion="v1", mooring="", source="", progress=True):
     """Grid a raw `.ad2cp` too large for memory. `reader` is dolfyn.read.
 
     Reads the file in `chunk`-ensemble windows, detects/grids casts on a rolling
@@ -230,6 +240,8 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
     """
     if attitude not in ATTITUDE_MODES:
         raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
+    if motion not in MOTION_VERSIONS:
+        raise ValueError(f"motion must be one of {MOTION_VERSIONS}, got {motion!r}")
     if total is None:
         total = _count_ensembles(fn, reader)
     kinds = ("up", "down") if cast_kind == "both" else (cast_kind,)
@@ -268,7 +280,8 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
                                                attitude)
                 g = process_cast(dsc, corr_min=corr_min,
                                  boxsize=boxsize, z_max=z_max, direction=look,
-                                 min_bin_samples=min_bin_samples, motion_correct=motion_correct)
+                                 min_bin_samples=min_bin_samples,
+                                 motion_correct=motion_correct, motion=motion)
                 results.append((g, c, src, err))
         # carry the tail (from the start of the held-back cast) into the next chunk,
         # remembering whether a real gap clipped its start (unknowable next chunk)
@@ -295,7 +308,7 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
     ds = _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                    corr_min=corr_min, min_bin_samples=min_bin_samples,
                    motion_correct=motion_correct, mooring=mooring, source=source,
-                   attitude=attitude)
+                   attitude=attitude, motion=motion)
     ds.attrs["ensemble_range"] = f"{int(ens_start)}:{int(total)}"
     return ds
 

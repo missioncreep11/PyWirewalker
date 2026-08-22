@@ -59,6 +59,11 @@ def main():
                     help="[velocity] pitch/roll source: the AHRS fusion, the accel-derived "
                          "reconstruction, or auto (reconstruct only on AHRS-faulted casts); "
                          "recorded per cast in the product (default ahrs)")
+    ap.add_argument("--motion", default=None, choices=["v1", "v2"],
+                    help="[velocity] motion-correction model: v1 = WWcorr_beam port "
+                         "(bandpass IMU + dp/dt, AHRS rotation), v2 = buoyant-ascent "
+                         "model (dp/dt vertical, depth-gated IMU horizontal, LP-accel "
+                         "tilt; AHRS-fault immune). Default v1")
     ap.add_argument("--mooring", default=None, help="mooring/deployment name for metadata")
     ap.add_argument("--start-ensemble", type=int, default=None,
                     help="first ensemble to process (trims deployment transit)")
@@ -101,6 +106,8 @@ def main():
         cfg.motion_correct = False
     if args.attitude is not None:
         cfg.attitude = args.attitude
+    if args.motion is not None:
+        cfg.motion = args.motion
     # A CLI bound overrides the config's *other* form of the same bound too —
     # otherwise a `start_time`/`end_time` in the config silently wins over the
     # ensemble flag the user just typed (resolve_trim gives times precedence).
@@ -146,14 +153,14 @@ def main():
             str(cfg.ad2cp_path), dolfyn.read, chunk=cfg.chunk, boxsize=cfg.boxsize_m,
             z_max=cfg.z_max_m, cast_kind=cast_kind, min_span_dbar=cfg.min_span_dbar,
             corr_min=cfg.corr_min, ens_start=ens_start, total=ens_stop,
-            motion_correct=cfg.motion_correct, attitude=cfg.attitude,
+            motion_correct=cfg.motion_correct, attitude=cfg.attitude, motion=cfg.motion,
             mooring=cfg.mooring, source=cfg.ad2cp_path.name, progress=True)
         _stamp_provenance(DS, cfg)
         save_l2(DS, str(out))
-        att = (f", attitude={cfg.attitude}: "
-               f"{DS.attrs['n_casts_attitude_reconstructed']} reconstructed, "
+        att = (f", motion={cfg.motion}, "
+               f"{DS.attrs['n_casts_attitude_reconstructed']} lp-tilt, "
                f"{DS.attrs['n_casts_attitude_fallback']} fallback"
-               if cfg.attitude != "ahrs" else "")
+               if (cfg.attitude != "ahrs" or cfg.motion != "v1") else "")
         print(f"[done] {DS.sizes['cast']} casts x {DS.sizes['depth']} depths "
               f"(look={DS.attrs['instrument_look']}{att}) -> {out} in {time.time()-t0:.0f}s")
 
