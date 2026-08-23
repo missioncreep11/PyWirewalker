@@ -52,6 +52,7 @@ class AdcpConfig:
     motion_correct: bool = True
     attitude: str = "ahrs"                     # ahrs | reconstructed | auto (l2.ATTITUDE_MODES)
     motion: str = "v1"                         # v1 | v2 (l2.MOTION_VERSIONS)
+    bin_average: str = "boxcar"                # boxcar | notch (l2.BIN_AVERAGE_MODES)
     # --- turbulence product ---
     dep_res_m: float = 3.0
     max_dep_m: float = 100.0
@@ -207,6 +208,7 @@ def load_adcp_config(path=None, assume_yes: bool = False) -> AdcpConfig:
         motion_correct=vel.get("motion_correct", True),
         attitude=vel.get("attitude", "ahrs"),
         motion=vel.get("motion", "v1"),
+        bin_average=vel.get("bin_average", "boxcar"),
         dep_res_m=turb.get("dep_res_m", 3.0),
         max_dep_m=turb.get("max_dep_m", 100.0),
         config_path=p,

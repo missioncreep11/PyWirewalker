@@ -27,6 +27,70 @@ def output_grid(boxsize: float, z_max: float) -> np.ndarray:
     return 0.5 * (edges[:-1] + edges[1:])
 
 
+# --------------------------------------------------------------------------- #
+# per-beam Doppler noise vs beam correlation
+# --------------------------------------------------------------------------- #
+# Measured on NOPP_d2 (Sig1000, 1 m cells, 8 Hz broadband) from within-ping
+# adjacent-cell velocity differences, where platform motion cancels exactly
+# (S100430A038_NOPP_d2/corr_weighting.py, 8 casts pooled). Instrument- and
+# configuration-specific: remeasure for other cell sizes / bandwidths.
+_SIGMA_CORR_MID = np.array([32.5, 37.5, 42.5, 47.5, 52.5, 57.5, 62.5,
+                            67.5, 72.5, 77.5, 82.5, 87.5, 92.5, 97.5])
+_SIGMA_CORR_VAL = np.array([0.1845, 0.1562, 0.1321, 0.1143, 0.0996, 0.0891,
+                            0.0797, 0.0713, 0.0650, 0.0587, 0.0545, 0.0514,
+                            0.0482, 0.0430])
+
+
+def beam_sigma(corr) -> np.ndarray:
+    """Per-sample beam-velocity Doppler noise (m/s) from beam correlation."""
+    return np.interp(np.asarray(corr, float), _SIGMA_CORR_MID, _SIGMA_CORR_VAL)
+
+
+# --------------------------------------------------------------------------- #
+# depth-gated per-bin notch (opt-in alternative to the boxcar bin mean)
+# --------------------------------------------------------------------------- #
+# Above this depth the bin mean is replaced by the constant of a ridged
+# constant + wave-band-sinusoid fit over the bin's dwell; below it the plain
+# mean is kept. Synthetic-truth study on real NOPP_d2 geometry
+# (S100430A038_NOPP_d2/wave_inversion.py): 7-17% rms improvement in the top
+# 50 m, a comparable penalty where no waves exist - hence the gate.
+#
+# The gain lives entirely on GAPPY dwells (real ones keep only 17-32% of
+# near-surface samples): gaps break the boxcar's wave cancellation, and the fit
+# restores it by modelling the wave on the actual sample support. On complete
+# uniform sampling the harmonic columns are orthogonal to the constant and the
+# notch reduces to the boxcar - it cannot hurt there.
+NOTCH_MAX_DEPTH_M = 60.0
+NOTCH_BAND = (0.04, 0.5)          # Hz, the surface-wave band
+NOTCH_RIDGE = 0.05                # prior scale (m/s) on the wave coefficients
+NOTCH_SIGMA = 0.13                # sample-noise scale setting the ridge strength
+
+
+def _notch_constant(tj, vj, *, band=NOTCH_BAND, ridge=NOTCH_RIDGE, sigma=NOTCH_SIGMA):
+    """Constant of a ridged (constant + wave-band sin/cos) fit; None if unfittable.
+
+    The ridge on the wave columns is required: gappy dwells make them
+    near-collinear and the unridged fit diverges catastrophically.
+    """
+    T = float(tj.max() - tj.min())
+    if T <= 0:
+        return None
+    f = np.arange(max(np.ceil(band[0] * T), 1), np.floor(band[1] * T) + 1) / T
+    p = 1 + 2 * f.size
+    if f.size == 0 or p >= vj.size:
+        return None
+    X = np.empty((vj.size, p))
+    X[:, 0] = 1.0
+    ph = 2 * np.pi * np.outer(tj - tj.min(), f)
+    X[:, 1::2] = np.cos(ph)
+    X[:, 2::2] = np.sin(ph)
+    R = np.zeros((p - 1, p))
+    R[:, 1:] = np.eye(p - 1) * (sigma / ridge)
+    c, *_ = np.linalg.lstsq(np.vstack([X, R]),
+                            np.concatenate([vj, np.zeros(p - 1)]), rcond=None)
+    return float(c[0])
+
+
 def _nominal_depth_grid(pressure, n_cells, cell_size, blank_dist, direction):
     """Per-ping nominal (no-tilt) cell depths, z positive up (MATLAB ``dpth_temp``)."""
     cell = np.arange(n_cells)
@@ -38,11 +102,22 @@ def _nominal_depth_grid(pressure, n_cells, cell_size, blank_dist, direction):
 
 def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
                  min_bin_samples=10, cell_size=None, blank_dist=None, beam_angle=None,
-                 motion_correct=True, motion="v1"):
+                 motion_correct=True, motion="v1", bin_average="boxcar"):
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
-    Returns dict with keys velE, velN, velU, amp, corr_mean, n_obs (each (nz,)),
-    plus scalars time (datetime64), pressure_max, pressure_min, and the depth grid `z`.
+    Returns dict with keys velE, velN, velU, amp, n_obs and per-component
+    ``*_sem`` standard errors (each (nz,)), plus scalars time (datetime64),
+    pressure_max, pressure_min, and the depth grid `z`.
+
+    ``bin_average="notch"`` replaces the bin mean above `NOTCH_MAX_DEPTH_M` with
+    the constant of a ridged constant + wave-band fit over the bin's dwell
+    (surface-wave residual suppression); the plain mean is kept below the gate
+    and everywhere when "boxcar" (the default).
+
+    The ``*_sem`` values are the Doppler-noise standard error of each bin mean,
+    from the measured `beam_sigma` correlation-noise relation. They exclude
+    correlated errors (attitude systematics, residual wave contamination), so
+    they are a floor, not a total error bar.
 
     ``motion="v2"`` uses the buoyant-ascent correction (`beam_motion_correction_v2`):
     its low-passed accel tilt then replaces the AHRS pitch/roll in *every* rotation
@@ -132,6 +207,16 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     out = {"z": zc_grid}
     comps = {"velE": enu[0], "velN": enu[1], "velU": enu[2],
              "amp": np.nanmean(amp, axis=0)}     # amp: mean over beams (ncell, nping)
+    # per-sample Doppler variance from the corr-noise relation: beam-mean beam
+    # variance projected through the beam->ENU geometry (E/N amplified by
+    # 1/(sqrt(2) sin th), U reduced by 1/(2 cos th)). corr is indexed on the
+    # measured cells while comps sit on the per-ping nominal grid - a benign
+    # approximation, the two differ by the tilt correction only.
+    th = np.deg2rad(ba)
+    s2_beam = np.mean(beam_sigma(corr) ** 2, axis=0)          # (ncell, nping)
+    var_fac = {"velE": 1.0 / (2 * np.sin(th) ** 2),
+               "velN": 1.0 / (2 * np.sin(th) ** 2),
+               "velU": 1.0 / (4 * np.cos(th) ** 2)}
     nobs = np.zeros(nz, int)
     for name, arr in comps.items():
         flat = arr.ravel()
@@ -142,7 +227,26 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
             nobs = cnt.astype(int)
         cnt[cnt < min_bin_samples] = np.nan
         out[name] = (ssum / cnt).astype(np.float32)
+        if name in var_fac:                       # var(mean) = sum(sigma_i^2)/n^2
+            v2 = (s2_beam * var_fac[name]).ravel()
+            ssum2 = np.bincount(ib[m], weights=v2[m], minlength=nz)
+            out[f"{name}_sem"] = (np.sqrt(ssum2) / cnt).astype(np.float32)
     out["n_obs"] = nobs
+
+    # depth-gated notch: refit the near-surface bins where surface waves live
+    if bin_average == "notch":
+        ts_s = dsc["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
+        tflat = np.broadcast_to(ts_s[None, :], depth.shape).ravel()
+        gate = np.flatnonzero(zc_grid < NOTCH_MAX_DEPTH_M)
+        for name in ("velE", "velN", "velU"):
+            flat = comps[name].ravel()
+            for j in gate:
+                m = valid & np.isfinite(flat) & (ib == j)
+                if m.sum() < max(min_bin_samples, 20):
+                    continue
+                c = _notch_constant(tflat[m], flat[m])
+                if c is not None:
+                    out[name][j] = c
 
     t = dsc["time"].values
     out["time"] = t[t.size // 2]

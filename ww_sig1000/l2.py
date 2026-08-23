@@ -17,10 +17,11 @@ from .attitude import DEFAULT_CUTOFF_HZ, reconstruct
 from .casts import detect_casts
 from .geometry import look_direction
 from .platform import AHRS_BAD_DEG, ahrs_error
-from .velocity import process_cast, output_grid
+from .velocity import NOTCH_MAX_DEPTH_M, process_cast, output_grid
 
 ATTITUDE_MODES = ("ahrs", "reconstructed", "auto")
 MOTION_VERSIONS = ("v1", "v2")
+BIN_AVERAGE_MODES = ("boxcar", "notch")
 _TILT_SOURCE_FLAG = {"ahrs": 0, "lp_accel": 1, "ahrs_fallback": 2}
 _HEADING_SOURCE_FLAG = {"ahrs": 0, "mag": 1}
 
@@ -51,11 +52,14 @@ def _cast_attitude(dsc, mode):
 
 
 def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_samples,
-              motion_correct, mooring, source, attitude="ahrs", motion="v1"):
+              motion_correct, mooring, source, attitude="ahrs", motion="v1",
+              bin_average="boxcar"):
     """Stack a list of (cast_result, Cast, att_src, ahrs_err) into an L2 xarray.Dataset."""
     zc = output_grid(boxsize, z_max)
     nz, ncast = zc.size, len(results)
-    G = {k: np.full((nz, ncast), np.nan, np.float32) for k in ("velE", "velN", "velU", "amp")}
+    G = {k: np.full((nz, ncast), np.nan, np.float32)
+         for k in ("velE", "velN", "velU", "amp",
+                   "velE_sem", "velN_sem", "velU_sem")}
     nobs = np.zeros((nz, ncast), np.int32)
     ctime = np.empty(ncast, "datetime64[ns]")
     cpmax = np.zeros(ncast)
@@ -93,6 +97,16 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
          "velN": (("depth", "cast"), G["velN"], {"units": "m s-1", "long_name": "northward velocity"}),
          "velU": (("depth", "cast"), G["velU"], {"units": "m s-1", "long_name": "upward velocity"}),
          "amp": (("depth", "cast"), G["amp"], {"units": "dB", "long_name": "beam-mean backscatter amplitude"}),
+         **{f"vel{c}_sem": (("depth", "cast"), G[f"vel{c}_sem"],
+                            {"units": "m s-1",
+                             "long_name": f"standard error of vel{c} (Doppler noise only)",
+                             "comment": "from the measured beam-correlation noise "
+                                        "relation (ww_sig1000.velocity.beam_sigma); "
+                                        "excludes correlated errors (attitude "
+                                        "systematics, residual surface-wave "
+                                        "contamination), so a floor, not a total "
+                                        "error bar"})
+            for c in ("E", "N", "U")},
          "n_obs": (("depth", "cast"), nobs, {"long_name": "samples averaged per bin"})},
         coords={"depth": ("depth", zc.astype(np.float32), {"units": "m", "positive": "down"}),
                 "cast": ("cast", np.arange(ncast, dtype=np.int32)),
@@ -143,6 +157,10 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                "instrument_look": look, "cast_kind": cast_kind,
                "n_casts_truncated": n_trunc,
                "attitude_mode": attitude,
+               "bin_average": ("boxcar mean" if bin_average == "boxcar"
+                               else f"notch above {NOTCH_MAX_DEPTH_M:g} m (ridged "
+                                    f"constant + wave-band fit per bin dwell), "
+                                    f"boxcar mean below"),
                "n_casts_attitude_reconstructed": int((csrc == 1).sum()),
                "n_casts_attitude_fallback": int((csrc == 2).sum()),
                "n_casts_heading_mag": int((chead == 1).sum()),
@@ -169,12 +187,15 @@ def _select_casts(press, t_s, fs, kinds, thhold_s, min_span_dbar):
 
 def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.0,
              corr_min=50, min_bin_samples=10, thhold_s=30.0, motion_correct=True,
-             attitude="ahrs", motion="v1", mooring="", source=""):
+             attitude="ahrs", motion="v1", bin_average="boxcar", mooring="", source=""):
     """Grid substantial casts of an in-memory Dataset into an L2 Dataset."""
     if attitude not in ATTITUDE_MODES:
         raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
     if motion not in MOTION_VERSIONS:
         raise ValueError(f"motion must be one of {MOTION_VERSIONS}, got {motion!r}")
+    if bin_average not in BIN_AVERAGE_MODES:
+        raise ValueError(f"bin_average must be one of {BIN_AVERAGE_MODES}, "
+                         f"got {bin_average!r}")
     fs = float(ds.attrs["fs"])
     t_s = ds["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
     press = ds["pressure"].values
@@ -191,12 +212,13 @@ def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.
         dsc, src, err = _cast_attitude(ds.isel(time=slice(c.start, c.stop + 1)), attitude)
         g = process_cast(dsc, corr_min=corr_min, boxsize=boxsize, z_max=z_max,
                          direction=look, min_bin_samples=min_bin_samples,
-                         motion_correct=motion_correct, motion=motion)
+                         motion_correct=motion_correct, motion=motion,
+                         bin_average=bin_average)
         results.append((g, c, src, err))
     return _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                      corr_min=corr_min, min_bin_samples=min_bin_samples,
                      motion_correct=motion_correct, mooring=mooring, source=source,
-                     attitude=attitude, motion=motion)
+                     attitude=attitude, motion=motion, bin_average=bin_average)
 
 
 def _count_ensembles(fn, reader):
@@ -235,7 +257,8 @@ def _count_ensembles(fn, reader):
 def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, boxsize=1.0,
                        z_max=None, cast_kind="both", min_span_dbar=40.0, corr_min=50,
                        min_bin_samples=10, thhold_s=30.0, gap_s=30.0, motion_correct=True,
-                       attitude="ahrs", motion="v1", mooring="", source="", progress=True):
+                       attitude="ahrs", motion="v1", bin_average="boxcar",
+                       mooring="", source="", progress=True):
     """Grid a raw `.ad2cp` too large for memory. `reader` is dolfyn.read.
 
     Reads the file in `chunk`-ensemble windows, detects/grids casts on a rolling
@@ -256,6 +279,9 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
         raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
     if motion not in MOTION_VERSIONS:
         raise ValueError(f"motion must be one of {MOTION_VERSIONS}, got {motion!r}")
+    if bin_average not in BIN_AVERAGE_MODES:
+        raise ValueError(f"bin_average must be one of {BIN_AVERAGE_MODES}, "
+                         f"got {bin_average!r}")
     if total is None:
         total = _count_ensembles(fn, reader)
     kinds = ("up", "down") if cast_kind == "both" else (cast_kind,)
@@ -295,7 +321,8 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
                 g = process_cast(dsc, corr_min=corr_min,
                                  boxsize=boxsize, z_max=z_max, direction=look,
                                  min_bin_samples=min_bin_samples,
-                                 motion_correct=motion_correct, motion=motion)
+                                 motion_correct=motion_correct, motion=motion,
+                                 bin_average=bin_average)
                 results.append((g, c, src, err))
         # carry the tail (from the start of the held-back cast) into the next chunk,
         # remembering whether a real gap clipped its start (unknowable next chunk)
@@ -322,7 +349,7 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
     ds = _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                    corr_min=corr_min, min_bin_samples=min_bin_samples,
                    motion_correct=motion_correct, mooring=mooring, source=source,
-                   attitude=attitude, motion=motion)
+                   attitude=attitude, motion=motion, bin_average=bin_average)
     ds.attrs["ensemble_range"] = f"{int(ens_start)}:{int(total)}"
     return ds
 
