@@ -22,6 +22,7 @@ from .velocity import process_cast, output_grid
 ATTITUDE_MODES = ("ahrs", "reconstructed", "auto")
 MOTION_VERSIONS = ("v1", "v2")
 _TILT_SOURCE_FLAG = {"ahrs": 0, "lp_accel": 1, "ahrs_fallback": 2}
+_HEADING_SOURCE_FLAG = {"ahrs": 0, "mag": 1}
 
 
 def _cast_attitude(dsc, mode):
@@ -62,6 +63,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
     cdir = np.zeros(ncast, np.int8)
     ccomplete = np.zeros(ncast, np.int8)
     csrc = np.zeros(ncast, np.int8)
+    chead = np.zeros(ncast, np.int8)
     cerr = np.full(ncast, np.nan)
     for j, (g, cast, src, err) in enumerate(results):
         for k in G:
@@ -75,6 +77,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
         # motion v2 chooses the tilt inside process_cast; its report wins over
         # the _cast_attitude decision when present
         csrc[j] = _TILT_SOURCE_FLAG[g["tilt_source"]] if "tilt_source" in g else src
+        chead[j] = _HEADING_SOURCE_FLAG.get(g.get("heading_source"), 0)
         cerr[j] = err
 
     order = np.argsort(ctime)                      # ensure time order
@@ -82,7 +85,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
         G[k] = G[k][:, order]
     nobs, ctime, cdir = nobs[:, order], ctime[order], cdir[order]
     cpmax, cpmin, ccomplete = cpmax[order], cpmin[order], ccomplete[order]
-    csrc, cerr = csrc[order], cerr[order]
+    csrc, chead, cerr = csrc[order], chead[order], cerr[order]
     n_trunc = int((ccomplete == 0).sum())
 
     return xr.Dataset(
@@ -118,6 +121,15 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                                                 "(vehicle too tilted or |a| != g), AHRS "
                                                 "kept - treat this cast's velocity as "
                                                 "suspect"}),
+                "heading_source": ("cast", chead,
+                                   {"long_name": "heading source for this cast",
+                                    "flag_values": np.array([0, 1], np.int8),
+                                    "flag_meanings": "ahrs magnetometer",
+                                    "comment": "1 = tilt-compensated magnetometer "
+                                               "compass (Stage 2); 0 = AHRS heading "
+                                               "(v1, fallback, or mag field unusable). "
+                                               "The AHRS has heading-only fault modes "
+                                               "invisible to ahrs_error_deg"}),
                 "ahrs_error_deg": ("cast", cerr.astype(np.float32),
                                    {"units": "degrees",
                                     "long_name": "median angle between AHRS up and measured gravity",
@@ -133,6 +145,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                "attitude_mode": attitude,
                "n_casts_attitude_reconstructed": int((csrc == 1).sum()),
                "n_casts_attitude_fallback": int((csrc == 2).sum()),
+               "n_casts_heading_mag": int((chead == 1).sum()),
                "attitude_reconstruction": (f"accel lowpass {DEFAULT_CUTOFF_HZ:g} Hz "
                                            f"(ww_sig1000.attitude)"),
                "grid_boxsize_m": boxsize, "grid_z_max_m": z_max,
@@ -141,7 +154,8 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                "motion_correction": (
                    "none" if not motion_correct
                    else "v2: dp/dt vertical + depth-gated bandpass IMU horizontal, "
-                        "LP-accel tilt rotation, spike pings excluded" if motion == "v2"
+                        "LP-accel tilt + tilt-compensated mag heading, "
+                        "spike pings excluded" if motion == "v2"
                    else "WWcorr_beam (bandpass-integrated IMU + dp/dt)"),
                "processing": "ww_sig1000 port of WW_Velocity_Processing_SWOT",
                "date_created": _time.strftime("%Y-%m-%dT%H:%M:%S")},

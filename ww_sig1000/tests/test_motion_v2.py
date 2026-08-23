@@ -160,6 +160,93 @@ def test_l2_records_motion_version_and_tilt_source():
     assert "v2" in l2.attrs["motion_correction"]
     assert int(l2["attitude_source"].values[0]) == 1
     assert l2.attrs["n_casts_attitude_reconstructed"] == 1
+    # no magnetometer in this dataset -> heading stays AHRS
+    assert int(l2["heading_source"].values[0]) == 0
+    assert l2.attrs["n_casts_heading_mag"] == 0
 
     with pytest.raises(ValueError, match="motion"):
         build_l2(_cast_ds(), motion="v3")
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: heading from the magnetometer
+# --------------------------------------------------------------------------- #
+B_FIELD = np.array([0.0, 100.0, -160.0])      # magnetic ENU: north + down, dip ~58 deg
+
+
+def _mag_from_attitude(heading, pitch, roll, B=B_FIELD):
+    """Forward model: the field the magnetometer would measure, (3, n).
+
+    The earth-fixed field seen in instrument coordinates is R^T B with
+    R = _tilt_heading_matrix(heading, pitch, roll) - the exact transform the
+    velocity pipeline uses, so recovery through `mag_heading` pins the convention.
+    """
+    from ww_sig1000.transforms import _tilt_heading_matrix
+    R = _tilt_heading_matrix(np.asarray(heading, float), np.asarray(pitch, float),
+                             np.asarray(roll, float))
+    return np.einsum("nji,j->in", R, B)
+
+
+def test_mag_heading_round_trips_through_the_pipeline_convention():
+    from ww_sig1000.attitude import mag_heading
+    n = 100
+    for h in (0.0, 45.0, 137.0, 250.0, 359.0):
+        for p, r in ((0.0, 0.0), (8.0, -5.0), (-12.0, 7.0)):
+            m = _mag_from_attitude(np.full(n, h), np.full(n, p), np.full(n, r))
+            hm, _ = mag_heading(m, np.full(n, p), np.full(n, r))
+            assert np.allclose((hm - h + 180) % 360 - 180, 0.0, atol=1e-9), (h, p, r)
+
+
+def test_mag_heading_needs_the_tilt_compensation():
+    """At 12 deg of tilt the uncompensated heading is degrees wrong."""
+    from ww_sig1000.attitude import mag_heading
+    n = 100
+    m = _mag_from_attitude(np.full(n, 70.0), np.full(n, 12.0), np.full(n, 6.0))
+    good, _ = mag_heading(m, np.full(n, 12.0), np.full(n, 6.0))
+    bad, _ = mag_heading(m, np.zeros(n), np.zeros(n))
+    assert np.allclose(good, 70.0, atol=1e-9)
+    assert np.abs((bad - 70.0 + 180) % 360 - 180).max() > 2.0
+
+
+def test_fit_hard_iron_recovers_a_known_offset():
+    from ww_sig1000.attitude import fit_hard_iron, mag_heading
+    n = 720
+    heading = np.arange(n) * 0.5 % 360.0        # a spinning vehicle: full circles
+    m = _mag_from_attitude(heading, np.zeros(n), np.zeros(n))
+    m_iron = m + np.array([7.0, -4.0, 3.0])[:, None]
+    _, mt = mag_heading(m_iron, np.zeros(n), np.zeros(n))
+    cx, cy, r = fit_hard_iron(mt[0], mt[1])
+    assert cx == pytest.approx(7.0, abs=0.01)
+    assert cy == pytest.approx(-4.0, abs=0.01)
+    assert r == pytest.approx(100.0, abs=0.1)
+    # corrected heading is exact again
+    h2, _ = mag_heading(m_iron, np.zeros(n), np.zeros(n), hard_iron=(cx, cy, 0.0))
+    assert np.abs((h2 - heading + 180) % 360 - 180).max() < 1e-6
+
+
+def test_v2_uses_the_mag_heading_and_ignores_a_faulted_ahrs_heading():
+    """Same measurements, AHRS heading garbage vs truth: identical v2 output when
+    the magnetometer is present - the Stage-2 analogue of the tilt immunity test."""
+    true_head = 137.0
+    ds_good = _cast_ds()
+    ds_bad = _cast_ds()
+    n = ds_good.sizes["time"]
+    m = _mag_from_attitude(np.full(n, true_head), np.zeros(n), np.zeros(n))
+    for ds in (ds_good, ds_bad):
+        ds["mag"] = (("dirIMU", "time"), m)
+    ds_good["heading"] = ("time", np.full(n, true_head))
+    ds_bad["heading"] = ("time", (np.arange(n) * 6.0) % 360.0)   # spinning garbage
+    good = process_cast(ds_good, motion="v2", z_max=60.0)
+    bad = process_cast(ds_bad, motion="v2", z_max=60.0)
+    for k in ("velE", "velN", "velU"):
+        np.testing.assert_array_equal(good[k], bad[k])
+    assert good["heading_source"] == bad["heading_source"] == "mag"
+
+
+def test_v2_keeps_ahrs_heading_when_the_field_is_junk():
+    ds = _cast_ds()
+    n = ds.sizes["time"]
+    rng = np.random.default_rng(1)
+    ds["mag"] = (("dirIMU", "time"), 5.0 * rng.standard_normal((3, n)))  # no stable field
+    out = process_cast(ds, motion="v2", z_max=60.0)
+    assert out["heading_source"] == "ahrs"

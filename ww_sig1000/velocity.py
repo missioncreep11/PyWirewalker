@@ -67,16 +67,22 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     # v2 motion model: attitude and correction come from the raw sensors together
     v2 = None
     tilt_source = None
+    heading_source = None
     if motion == "v2" and "accel" in dsc:
         ts_v2 = dsc["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
         v2 = beam_motion_correction_v2(ts_v2, press, dsc["accel"].values, head,
-                                       float(a["fs"]), beam_angle=ba)
+                                       float(a["fs"]),
+                                       mag=dsc["mag"].values if "mag" in dsc else None,
+                                       beam_angle=ba)
         if v2.usable:
             pitch, roll = v2.pitch_deg, v2.roll_deg
+            head = v2.heading_deg          # Stage-2 compass when the field is sane
             tilt_source = "lp_accel"
+            heading_source = v2.heading_source
         else:
             v2 = None
             tilt_source = "ahrs_fallback"
+            heading_source = "ahrs"
 
     # 1. correlation mask: any beam below threshold at a (cell, ping) -> drop all beams there
     bad = (corr < corr_min).any(axis=0)        # (range, time)
@@ -144,4 +150,5 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     out["pressure_min"] = float(np.nanmin(press))
     if tilt_source is not None:
         out["tilt_source"] = tilt_source
+        out["heading_source"] = heading_source
     return out

@@ -120,6 +120,67 @@ class TiltReconstruction:
                 "cutoff_hz": self.cutoff_hz}
 
 
+# --------------------------------------------------------------------------- #
+# Stage 2: heading from the tilt-compensated magnetometer
+# --------------------------------------------------------------------------- #
+def mag_heading(mag, pitch_deg, roll_deg, hard_iron=(0.0, 0.0, 0.0)):
+    """Tilt-compensated magnetic heading (deg), in the pipeline's convention.
+
+    Inverts ``transforms._tilt_heading_matrix``: the earth's field has zero *east*
+    component in magnetic coordinates, so after tilt-correcting the measured field
+    with P(pitch, roll), ``heading = atan2(-m_x, m_y) + 90``. With ``DECL = 0`` in
+    the deployment configuration the AHRS heading is also magnetic, so the two are
+    directly comparable (measured agreement on healthy NOPP_d2 casts: <= 1.6 deg
+    with no calibration).
+
+    Why trust it: on the 2024-05-02 AHRS fault the mag-derived heading rate tracks
+    the gyro at r = 0.985 while the AHRS claims -47.7 deg/s; and on two nominally
+    healthy casts (2024-04-29, 2024-05-06) the AHRS heading drifted at -4 deg/s
+    against both gyro and magnetometer - a *heading-only* AHRS fault mode that the
+    tilt-based `ahrs_error` detector cannot see.
+
+    Returns ``(heading_deg, m_tilt)`` where ``m_tilt`` is the (3, n) tilt-corrected
+    field - its horizontal magnitude is the per-ping quality check.
+    """
+    from .transforms import _tilt_heading_matrix
+    m = np.asarray(mag, float) - np.asarray(hard_iron, float)[:, None]
+    n = m.shape[1]
+    P = _tilt_heading_matrix(np.full(n, 90.0), pitch_deg, roll_deg)   # H(0) = I
+    mt = np.einsum("nij,jn->in", P, m)
+    head = (np.rad2deg(np.arctan2(-mt[0], mt[1])) + 90.0) % 360.0
+    return head, mt
+
+
+def fit_hard_iron(mt_x, mt_y) -> tuple[float, float, float]:
+    """Kasa circle fit of the tilt-compensated horizontal field over spinning data.
+
+    Returns (cx, cy, radius): the hard-iron offset in the tilt-corrected horizontal
+    plane and the field radius. On NOPP_d2 the offset is ~2.7% of the radius
+    (<= 1.6 deg of heading), so calibration is optional there - but the Wirewalker's
+    spin makes the fit geometry ideal wherever it is needed.
+    """
+    x = np.asarray(mt_x, float)
+    y = np.asarray(mt_y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    A = np.c_[2 * x, 2 * y, np.ones_like(x)]
+    c = np.linalg.lstsq(A, x ** 2 + y ** 2, rcond=None)[0]
+    return float(c[0]), float(c[1]), float(np.sqrt(c[2] + c[0] ** 2 + c[1] ** 2))
+
+
+def mag_field_ok(mag, mt, *, min_horiz_frac=0.2, max_cv=0.15) -> bool:
+    """Is the magnetometer field sane enough to steer by?
+
+    The tilt-corrected horizontal magnitude must be a stable, substantial fraction
+    of the total field (dip ~58 deg in California leaves ~53% horizontal; a mooring
+    with severe iron or a failed sensor does not).
+    """
+    h = np.hypot(mt[0], mt[1])
+    hm = float(np.median(h))
+    total = float(np.median(np.linalg.norm(np.asarray(mag, float), axis=0)))
+    return bool(hm > min_horiz_frac * total and np.std(h) / max(hm, 1e-9) < max_cv)
+
+
 def lowpass_smear_deg(accel, fs, cutoff_hz=DEFAULT_CUTOFF_HZ, u_lp=None) -> float:
     """Median angle (deg) between the raw and low-passed gravity directions.
 

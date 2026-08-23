@@ -131,6 +131,8 @@ class MotionV2:
     platform_enu: np.ndarray    # (3, n) estimated platform velocity [E, N, Up]
     pitch_deg: np.ndarray       # LP-accel tilt actually used for every rotation -
     roll_deg: np.ndarray        # the caller must use the same for beam2enu/cell_depths
+    heading_deg: np.ndarray     # heading used for every rotation (mag when usable)
+    heading_source: str         # "mag" | "ahrs"
     ping_ok: np.ndarray         # (n,) False where |a| was a spike (interpolated over)
     h_gain: np.ndarray          # (n,) depth gate applied to the horizontal term
     usable: bool                # tilt guard + gravity check passed
@@ -144,22 +146,28 @@ def _depth_gain(pressure, full_m=H_GAIN_FULL_M, zero_m=H_GAIN_ZERO_M):
     return 0.5 * (1.0 + np.cos(np.pi * x))
 
 
-def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *,
+def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *, mag=None,
                               beam_angle=25.0, tilt_cutoff_hz=None,
                               h_full_m=H_GAIN_FULL_M, h_zero_m=H_GAIN_ZERO_M) -> MotionV2:
     """Per-ping platform-velocity correction for the buoyant-ascent upcast.
 
     Note the signature: the AHRS pitch/roll are *not* inputs. Tilt comes from the
     low-passed accelerometer (``attitude.gravity_direction``), so an AHRS attitude
-    fault cannot enter the correction. Heading still comes from the AHRS (a heading
-    error rotates the horizontal correction without changing its magnitude).
+    fault cannot enter the correction. When ``mag`` (the raw magnetometer, (3, n))
+    is given and the field is sane, heading likewise comes from the
+    tilt-compensated compass (Stage 2) instead of the passed-in AHRS heading — the
+    AHRS has heading-only fault modes that the tilt detector cannot see, while the
+    mag heading tracks the gyro at r ~ 0.98 straight through them. The heading
+    actually used is returned in ``heading_deg``/``heading_source`` and the caller
+    must use it for beam2enu.
 
     Returns a `MotionV2`; when ``usable`` is False (vehicle too tilted for the
     low-pass to be legal, or the accelerometer is not measuring gravity) the caller
     should fall back to the v1 path rather than trust these fields.
     """
     from .attitude import (DEFAULT_CUTOFF_HZ, LOWPASS_SMEAR_MAX_DEG,
-                           gravity_direction, lowpass_smear_deg, pitch_roll_from_up)
+                           gravity_direction, lowpass_smear_deg, mag_field_ok,
+                           mag_heading, pitch_roll_from_up)
     from .platform import ACCEL_TOL
 
     cutoff = DEFAULT_CUTOFF_HZ if tilt_cutoff_hz is None else tilt_cutoff_hz
@@ -169,8 +177,8 @@ def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *,
 
     # spikes: interpolate over them (v1 zeroed them, turning each into a velocity
     # step after integration) and flag the pings for the caller to exclude
-    mag = np.linalg.norm(acc, axis=0)
-    spike = np.abs(mag - G) > SPIKE_TOL
+    amag = np.linalg.norm(acc, axis=0)
+    spike = np.abs(amag - G) > SPIKE_TOL
     ping_ok = ~spike
     if spike.any() and ping_ok.any():
         idx = np.arange(n)
@@ -181,7 +189,16 @@ def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *,
     u = gravity_direction(acc, fs, cutoff)
     pitch, roll = pitch_roll_from_up(u)
     usable = bool(lowpass_smear_deg(acc, fs, cutoff, u_lp=u) < LOWPASS_SMEAR_MAX_DEG
-                  and abs(np.median(mag[ping_ok]) - G) < ACCEL_TOL) if ping_ok.any() else False
+                  and abs(np.median(amag[ping_ok]) - G) < ACCEL_TOL) if ping_ok.any() else False
+
+    # heading from the tilt-compensated compass (Stage 2), if the field is sane
+    heading = np.asarray(heading, float)
+    heading_source = "ahrs"
+    if mag is not None:
+        h_mag, mt = mag_heading(mag, pitch, roll)
+        if mag_field_ok(mag, mt):
+            heading = h_mag
+            heading_source = "mag"
 
     # horizontal: bandpass-integrated earth-frame acceleration, depth-gated.
     # (no IMU vertical term at all - on the upcast dp/dt is the vertical motion)
@@ -205,5 +222,6 @@ def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *,
         bX, bY, bZ = (float(v) for v in get_unit_vectors(phi, azi[b], 0.0, 0.0))
         corr_beam[b] = vel_xyz[0] * bX + vel_xyz[1] * bY + vel_xyz[2] * bZ
     return MotionV2(corr_beam=corr_beam, platform_enu=platform_enu,
-                    pitch_deg=pitch, roll_deg=roll, ping_ok=ping_ok,
-                    h_gain=gain, usable=usable)
+                    pitch_deg=pitch, roll_deg=roll,
+                    heading_deg=heading, heading_source=heading_source,
+                    ping_ok=ping_ok, h_gain=gain, usable=usable)
