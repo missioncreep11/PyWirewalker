@@ -153,9 +153,9 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                "motion_version": motion,
                "motion_correction": (
                    "none" if not motion_correct
-                   else "v2: dp/dt vertical + depth-gated bandpass IMU horizontal, "
-                        "LP-accel tilt + tilt-compensated mag heading, "
-                        "spike pings excluded" if motion == "v2"
+                   else "v2: along-wire dp/dt (vertical + sail) + depth-gated "
+                        "bandpass IMU horizontal, LP-accel tilt + tilt-compensated "
+                        "mag heading, spike pings excluded" if motion == "v2"
                    else "WWcorr_beam (bandpass-integrated IMU + dp/dt)"),
                "processing": "ww_sig1000 port of WW_Velocity_Processing_SWOT",
                "date_created": _time.strftime("%Y-%m-%dT%H:%M:%S")},

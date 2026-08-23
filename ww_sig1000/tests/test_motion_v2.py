@@ -69,6 +69,24 @@ def test_horizontal_correction_is_depth_gated():
     assert h_dp.max() < 1e-6, "gate must be exactly 0 at depth"
 
 
+def test_sail_correction_on_a_leaning_wire():
+    """Ascending an angled wire has a real horizontal component: w*tan(tilt),
+    along the lean azimuth (MATLAB sail_corr) - here from the LP tilt, not the AHRS."""
+    n = 4000
+    t, press, _, head = _inputs(n, ascent=0.4, p0=300.0)
+    leaning = up_from_pitch_roll(np.full(n, 13.0), np.zeros(n)) * G
+    v2 = beam_motion_correction_v2(t, press, leaning, head, FS)
+    h = np.hypot(v2.platform_enu[0, INTERIOR], v2.platform_enu[1, INTERIOR])
+    assert np.allclose(h, 0.4 * np.tan(np.deg2rad(13.0)), rtol=0.05)
+    assert np.allclose(v2.platform_enu[2, INTERIOR], 0.4, atol=0.01), \
+        "the vertical term must be unchanged by the sail split"
+    off = beam_motion_correction_v2(t, press, leaning, head, FS, sail=False)
+    assert np.hypot(off.platform_enu[0], off.platform_enu[1]).max() < 1e-6
+    upright = beam_motion_correction_v2(*_inputs(n, ascent=0.4, p0=300.0), FS)
+    assert np.hypot(upright.platform_enu[0], upright.platform_enu[1]).max() < 1e-3, \
+        "no sail on an upright vehicle"
+
+
 def test_depth_gain_shape():
     assert _depth_gain(np.array([0.0, H_GAIN_FULL_M])).tolist() == [1.0, 1.0]
     assert _depth_gain(np.array([H_GAIN_ZERO_M, 400.0])).tolist() == [0.0, 0.0]

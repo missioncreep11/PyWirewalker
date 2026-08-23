@@ -147,7 +147,8 @@ def _depth_gain(pressure, full_m=H_GAIN_FULL_M, zero_m=H_GAIN_ZERO_M):
 
 
 def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *, mag=None,
-                              beam_angle=25.0, tilt_cutoff_hz=None,
+                              beam_angle=25.0, tilt_cutoff_hz=None, sail=True,
+                              z_unit=(0.0, 0.0, 1.0),
                               h_full_m=H_GAIN_FULL_M, h_zero_m=H_GAIN_ZERO_M) -> MotionV2:
     """Per-ping platform-velocity correction for the buoyant-ascent upcast.
 
@@ -212,7 +213,24 @@ def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *, mag=N
     gain = _depth_gain(pressure, h_full_m, h_zero_m)
 
     dpw = _lowpass_reflect(np.gradient(np.asarray(pressure, float), dt), fs, fc=0.3)
-    platform_enu = np.vstack([gain * WWu, gain * WWv, -dpw])
+
+    # "sail" term (MATLAB WWvel_upward sail_corr): the vehicle travels along the
+    # wire, i.e. along its own axis, so on an angled wire the ascent has a real
+    # horizontal component: v_platform = s * zhat with s set by dp/dt through the
+    # axis's vertical component (s * b_z = -dp/dt). At the 8-13 deg lean NOPP_d2
+    # carried after June this is 0.06-0.11 m/s along the lean azimuth - first
+    # order against the currents. The MATLAB rotates with the AHRS attitude; here
+    # zhat comes from the LP tilt + compass heading, so a fault cannot inject
+    # 0.46*tan(43 deg) of fiction.
+    if sail:
+        zed = np.tile(np.asarray(z_unit, float).reshape(3, 1, 1), (1, 1, n))
+        zhat = xyz2enu(zed, heading, pitch, roll)[:, 0, :]        # mount axis in ENU
+        b_z = np.clip(zhat[2], 0.5, 1.0)                          # guard: tilt < 60 deg
+        s = -dpw / b_z
+        sail_e, sail_n = s * zhat[0], s * zhat[1]
+    else:
+        sail_e = sail_n = 0.0
+    platform_enu = np.vstack([gain * WWu + sail_e, gain * WWv + sail_n, -dpw])
 
     vel_xyz = xyz2enu(platform_enu[:, None, :], heading, pitch, roll, reverse=True)[:, 0, :]
     phi = np.deg2rad(90.0 - beam_angle)     # geometry phi is elevation from horizontal
