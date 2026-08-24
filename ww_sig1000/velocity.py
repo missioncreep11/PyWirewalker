@@ -66,6 +66,22 @@ NOTCH_RIDGE = 0.05                # prior scale (m/s) on the wave coefficients
 NOTCH_SIGMA = 0.13                # sample-noise scale setting the ridge strength
 
 
+def _nan_gaussian(x, win=8, alpha=2.5, axis=-1):
+    """NaN-aware Gaussian smoothing, matching MATLAB smoothdata(...,'gaussian',win)
+    (window of `win` samples, alpha = 2.5)."""
+    from scipy.ndimage import convolve1d
+    m = np.arange(win) - (win - 1) / 2.0
+    k = np.exp(-0.5 * (2 * alpha * m / (win - 1)) ** 2)
+    k /= k.sum()
+    w = np.isfinite(x).astype(float)
+    num = convolve1d(np.nan_to_num(x), k, axis=axis, mode="nearest")
+    den = convolve1d(w, k, axis=axis, mode="nearest")
+    with np.errstate(invalid="ignore"):
+        out = num / den
+    out[w == 0] = np.nan
+    return out
+
+
 def _notch_constant(tj, vj, *, band=NOTCH_BAND, ridge=NOTCH_RIDGE, sigma=NOTCH_SIGMA):
     """Constant of a ridged (constant + wave-band sin/cos) fit; None if unfittable.
 
@@ -105,9 +121,14 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
                  motion_correct=True, motion="v1", bin_average="boxcar"):
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
-    Returns dict with keys velE, velN, velU, amp, n_obs and per-component
-    ``*_sem`` standard errors (each (nz,)), plus scalars time (datetime64),
-    pressure_max, pressure_min, and the depth grid `z`.
+    Returns dict with keys velE, velN, velU, amp, shearE, shearN, n_obs and
+    per-component ``*_sem`` standard errors (each (nz,)), plus scalars time
+    (datetime64), pressure_max, pressure_min, and the depth grid `z`.
+
+    ``shearE``/``shearN`` are the beam-differenced shear (WWvel_upward's
+    ``beamshear``): centred cell differences along each beam before any
+    rotation, so per-ping common-mode errors - platform motion, attitude
+    leakage, the sail term - cancel exactly and no motion correction applies.
 
     ``bin_average="notch"`` replaces the bin mean above `NOTCH_MAX_DEPTH_M` with
     the constant of a ridged constant + wave-band fit over the bin's dwell
@@ -166,9 +187,21 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     # 2. tilt-corrected per-beam cell depths (nping, ncell, 4), positive up
     z, ranges, bZ = cell_depths(press, pitch, roll, nc, cs, bd, beam_angle_deg=ba)
 
+    # 2b. beam shear (port of WWvel_upward's beamshear): centered difference
+    # (v[c+2]-v[c])/(z[c+2]-z[c]) along each beam on the RAW beam velocities with
+    # the tilt-corrected per-beam cell heights. Anything constant across a ping's
+    # cells - platform translation, attitude-error leakage of the ascent, the
+    # sail term - cancels exactly in the difference, so beam shear is immune to
+    # the whole motion/attitude error family and gets no motion correction.
+    z_bcn = np.transpose(z, (2, 1, 0))         # (beam, cell, ping)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        bshear = ((vel[:, 2:, :] - vel[:, :-2, :])
+                  / (z_bcn[:, 2:, :] - z_bcn[:, :-2, :]))  # centred at cells 1..nc-2
+
     # 3. per-ping nominal depth grid + interpolate each beam onto it
     dpth_nom = _nominal_depth_grid(press, nc, cs, bd, direction)   # (nping, ncell)
     eq_vel = np.full((nb, nc, npg), np.nan)
+    eq_shear = np.full((nb, max(nc - 2, 1), npg), np.nan)
     for n in range(npg):
         if not np.isfinite(z[n, 0, 0]):        # ping's beams not pointing up -> skip
             continue
@@ -182,6 +215,15 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
             zc, v = zc[ok], v[ok]
             o = np.argsort(zc)
             eq_vel[b, :, n] = np.interp(tgt, zc[o], v[o], left=np.nan, right=np.nan)
+            if nc > 2:
+                zs = z[n, 1:-1, b]
+                s = bshear[b, :, n]
+                oks = np.isfinite(zs) & np.isfinite(s)
+                if oks.sum() >= 2:
+                    zss, ss = zs[oks], s[oks]
+                    osrt = np.argsort(zss)
+                    eq_shear[b, :, n] = np.interp(tgt[1:-1], zss[osrt], ss[osrt],
+                                                  left=np.nan, right=np.nan)
 
     # 3b. platform-motion correction: add the platform's along-beam velocity
     if motion_correct and v2 is not None:
@@ -193,8 +235,14 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
             ts, press, dsc["accel"].values, pitch, roll, head, float(a["fs"]), beam_angle=ba)
         eq_vel = eq_vel + corr_beam[:, None, :]                    # broadcast over cells
 
-    # 4. beam -> ENU on the depth-aligned velocities
+    # 4. beam -> ENU on the depth-aligned velocities; likewise the beam shears
+    # (d/dz is linear, so rotating the four beam shears is rotating the shear).
+    # MATLAB then Gaussian-smooths along pings (window 8 ~ 1 s) and masks the two
+    # cells nearest the transducer (stagnation-point contamination).
     enu = beam2enu(eq_vel, head, pitch, roll, theta_deg=ba)        # (3, ncell, nping)
+    shear_enu = beam2enu(eq_shear, head, pitch, roll, theta_deg=ba)[:2]
+    shear_enu[:, :2, :] = np.nan
+    shear_enu = _nan_gaussian(shear_enu, axis=-1)
 
     # 5. box-average ENU samples onto the output depth grid
     zc_grid = output_grid(boxsize, z_max)
@@ -232,6 +280,31 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
             ssum2 = np.bincount(ib[m], weights=v2[m], minlength=nz)
             out[f"{name}_sem"] = (np.sqrt(ssum2) / cnt).astype(np.float32)
     out["n_obs"] = nobs
+
+    # 5b. bin the beam-differenced shear onto the same grid (interior cells at
+    # their nominal depths). The Gaussian ping-smoothing is mean-preserving, so
+    # the SEM uses the unsmoothed per-sample variance: 2 sigma_b^2 / dz^2 per
+    # beam through the same beam->ENU geometry factor.
+    if nc > 2:
+        depth_sh = -dpth_nom[:, 1:-1].T                  # (ncell-2, nping), +down
+        ib_sh = np.digitize(depth_sh.ravel(), edges) - 1
+        valid_sh = (ib_sh >= 0) & (ib_sh < nz) & np.isfinite(depth_sh.ravel())
+        ib_sh = np.clip(ib_sh, 0, nz - 1)
+        dz_eff = 2.0 * cs * np.cos(th)                   # centred-difference span
+        v2s = (s2_beam[1:-1, :] * var_fac["velE"] * 2.0 / dz_eff ** 2).ravel()
+        for name, arr in (("shearE", shear_enu[0]), ("shearN", shear_enu[1])):
+            flat = arr.ravel()
+            m = valid_sh & np.isfinite(flat)
+            ssum = np.bincount(ib_sh[m], weights=flat[m], minlength=nz)
+            cnt = np.bincount(ib_sh[m], minlength=nz).astype(float)
+            cnt[cnt < min_bin_samples] = np.nan
+            out[name] = (ssum / cnt).astype(np.float32)
+            ssum2 = np.bincount(ib_sh[m], weights=v2s[m], minlength=nz)
+            out[f"{name}_sem"] = (np.sqrt(ssum2) / cnt).astype(np.float32)
+    else:                                                # too few cells for shear
+        for name in ("shearE", "shearN"):
+            out[name] = np.full(nz, np.nan, np.float32)
+            out[f"{name}_sem"] = np.full(nz, np.nan, np.float32)
 
     # depth-gated notch: refit the near-surface bins where surface waves live
     if bin_average == "notch":

@@ -58,8 +58,8 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
     zc = output_grid(boxsize, z_max)
     nz, ncast = zc.size, len(results)
     G = {k: np.full((nz, ncast), np.nan, np.float32)
-         for k in ("velE", "velN", "velU", "amp",
-                   "velE_sem", "velN_sem", "velU_sem")}
+         for k in ("velE", "velN", "velU", "amp", "shearE", "shearN",
+                   "velE_sem", "velN_sem", "velU_sem", "shearE_sem", "shearN_sem")}
     nobs = np.zeros((nz, ncast), np.int32)
     ctime = np.empty(ncast, "datetime64[ns]")
     cpmax = np.zeros(ncast)
@@ -97,6 +97,23 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
          "velN": (("depth", "cast"), G["velN"], {"units": "m s-1", "long_name": "northward velocity"}),
          "velU": (("depth", "cast"), G["velU"], {"units": "m s-1", "long_name": "upward velocity"}),
          "amp": (("depth", "cast"), G["amp"], {"units": "dB", "long_name": "beam-mean backscatter amplitude"}),
+         **{f"shear{c}": (("depth", "cast"), G[f"shear{c}"],
+                          {"units": "s-1",
+                           "long_name": f"vertical shear of vel{c} (beam-differenced)",
+                           "comment": "centred cell differences along each beam "
+                                      "before rotation (WWvel_upward beamshear), "
+                                      "so per-ping common-mode errors - platform "
+                                      "motion, attitude leakage, the sail term - "
+                                      "cancel exactly; no motion correction is "
+                                      "applied or needed. Gaussian-smoothed ~1 s "
+                                      "along pings; two cells nearest the "
+                                      "transducer masked (stagnation)"})
+            for c in ("E", "N")},
+         **{f"shear{c}_sem": (("depth", "cast"), G[f"shear{c}_sem"],
+                              {"units": "s-1",
+                               "long_name": f"standard error of shear{c} "
+                                            f"(Doppler noise only)"})
+            for c in ("E", "N")},
          **{f"vel{c}_sem": (("depth", "cast"), G[f"vel{c}_sem"],
                             {"units": "m s-1",
                              "long_name": f"standard error of vel{c} (Doppler noise only)",
