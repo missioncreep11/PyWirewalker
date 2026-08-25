@@ -8,6 +8,7 @@ profiles (`velocity.process_cast`) into an `xarray.Dataset` with dims
 """
 from __future__ import annotations
 
+import os
 import time as _time
 
 import numpy as np
@@ -371,7 +372,22 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
     return ds
 
 
+def _atomic_to_netcdf(ds, path, enc):
+    """Write to a temp file then atomically replace `path`. A rebuild then never
+    truncates the existing product on failure, and the swap succeeds even if a
+    reader (e.g. a Jupyter kernel) still holds the old file open (POSIX rename
+    keeps the reader on the old inode)."""
+    tmp = f"{path}.tmp{os.getpid()}"
+    try:
+        ds.to_netcdf(tmp, encoding=enc)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
 def save_l2(ds_l2, path):
     enc = {v: {"zlib": True, "complevel": 4} for v in ds_l2.data_vars}
-    ds_l2.to_netcdf(path, encoding=enc)
+    _atomic_to_netcdf(ds_l2, str(path), enc)
     return path

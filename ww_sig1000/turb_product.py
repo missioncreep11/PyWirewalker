@@ -15,7 +15,7 @@ import numpy as np
 import xarray as xr
 
 from .casts import detect_casts
-from .l2 import _count_ensembles
+from .l2 import _count_ensembles, _atomic_to_netcdf
 from .turbulence import process_cast_turbulence, hr_bins
 
 _VARS = ("eps", "N", "SNR", "A", "corr", "num", "eps_sf", "N_sf", "A_sf")
@@ -164,5 +164,5 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None, ens_sta
 
 def save_turbulence(ds, path):
     enc = {v: {"zlib": True, "complevel": 4} for v in ds.data_vars}
-    ds.to_netcdf(path, encoding=enc)
+    _atomic_to_netcdf(ds, str(path), enc)
     return path
