@@ -211,18 +211,19 @@ Two motion-correction models are provided:
 \begin{itemize}
 \item \textbf{v1} --- a port of the original \code{WWcorr\_beam}: bandpass-integrated IMU
 acceleration plus the pressure-rate ($dp/dt$) ascent, rotated by the AHRS attitude.
-\item \textbf{v2 (improvement)} --- a buoyant-ascent model in which the vertical velocity is
-taken from $dp/dt$, the horizontal platform motion is depth-gated, and the tilt is derived
-from low-passed accelerometer data. This model is immune to AHRS attitude faults and adds a
-\textbf{sail correction} for the along-wire travel of the vehicle on an inclined mooring line.
+\item \textbf{v2} --- a buoyant-ascent model in which the vertical velocity is taken from
+$dp/dt$, the horizontal platform motion is depth-gated, and the tilt is derived from
+low-passed accelerometer data. It is immune to AHRS attitude faults and applies a
+\textbf{sail correction} (ported from the reference code) for the along-wire travel of the
+vehicle on an inclined mooring line.
 The attitude source is selectable (\code{ahrs}, \code{reconstructed}, or \code{auto}, which
 reconstructs only on AHRS-faulted casts) and is recorded per cast. The model (\code{motion}),
 whether any motion correction is applied (\code{motion\_correct}), and the attitude source
 (\code{attitude}) are all configuration selections.
 \end{itemize}
 
-\textbf{Improvement --- motion-immune shear.} In addition to gridded velocity, the L2 product
-carries a \textbf{beam-differenced vertical shear} (\code{shearE}, \code{shearN}), a port of
+\textbf{Motion-immune shear (ported).} In addition to gridded velocity, the L2 product
+carries a \textbf{beam-differenced vertical shear} (\code{shearE}, \code{shearN}), ported from
 the toolbox's \code{beamshear}. Centred cell differences
 $(v_{c+1}-v_{c-1})/(z_{c+1}-z_{c-1})$ are formed \textbf{along each raw beam before rotation}.
 Any quantity common to a ping's cells --- platform translation, attitude-error leakage of the
@@ -370,8 +371,7 @@ file.
 Ingest & \code{.mat} export $+$ \code{sort\_file}/\code{merge\_signature} & Direct \code{.ad2cp} read via DOLfYN; bounded-memory streaming \\
 Turbulence (spectral) & \code{WWturb\_upward.m} ($+0.28$~dex bias) & \code{ProcessSingleProfile.m} method; validated to $-0.00$~dex / corr 0.994 \\
 Turbulence (2nd estimator) & Present but unused & Structure-function $\eps$ in every product; gap-robust in low scattering \\
-Shear & --- & Beam-differenced, motion-immune shear $+$ per-bin Doppler SEM \\
-Motion correction & Single AHRS-based model & v1/v2 models; buoyant-ascent $+$ sail correction; selectable/auto attitude \\
+Motion correction & Single AHRS-based model & Selectable v1/v2 models with \code{auto} attitude reconstruction, robust to AHRS faults \\
 Quality control & --- & $\eps$--noise-floor coupling; transfer-function shear noise floor; rotary spectra \\
 Reproducibility & Script constants & Config-driven, unit-tested, provenance in attrs, atomic writes \\
 \bottomrule
