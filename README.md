@@ -127,7 +127,7 @@ bins are left **NaN — no temporal interpolation** in the archival product; a c
 product fills only isolated single-bin gaps (≤ `l3_interp_max_gap_bins`). The squared buoyancy
 frequency is
 
-$$N^2 = \frac{g}{\rho_0}\,\frac{\partial \sigma_0}{\partial z}$$
+$$N^2 = \frac{g}{\rho_0} \frac{\partial \sigma_0}{\partial z}$$
 
 ($z$ positive down, $g$ = `gravity`) from the gridded σ₀ after a NaN-aware boxcar smooth of length
 `n2_vertical_smoothing_m` (5 m default).
@@ -185,7 +185,7 @@ samples (`corr_min`); angular-demean/unwrap the wrapped velocity; subtract the d
 profile**; de-spike and detrend; form band-averaged vertical-wavenumber spectra over depth bins
 (`dep_res_m`, `max_dep_m`) and fit the Kolmogorov model
 
-$$S(k) = N + A\,k^{-5/3}, \qquad \varepsilon = (A/C_K)^{3/2}, \quad C_K = 0.53,$$
+$$S(k) = N + A \cdot k^{-5/3}, \qquad \varepsilon = (A/C_K)^{3/2}, \quad C_K = 0.53,$$
 
 with $N$ the white noise floor and $A$ the inertial-subrange amplitude.
 
@@ -206,7 +206,7 @@ RMS ≈ 0.08 dex, corr(log ε) = 0.994**, with exactly the published profile cou
 `WWturb_upward.m` (present but unused in the original) into a parallel estimate from the same
 preprocessed velocity, accumulating
 
-$$D(r) = N + A\,r^{2/3}, \qquad \varepsilon = (A/C_{SF})^{3/2},$$
+$$D(r) = N + A \cdot r^{2/3}, \qquad \varepsilon = (A/C_{SF})^{3/2},$$
 
 over valid sample pairs only. $C_{SF} = 1.476$ is cross-calibrated to the validated spectral ε on
 the high-scattering TLC deployment (literature value ≈ 2.0), so `epsilon` and `epsilon_sf` share
@@ -227,7 +227,7 @@ The port adds quantitative quality measures absent from the original toolbox:
   component in mid-water, extending the trustworthy range.
 - **Transfer-function shear noise floor.** A flat SEM-derived floor is the *wrong shape* for
   beam-differenced shear: differencing plus the box-average shape the noise as
-  $|H(m)|^2 \propto \sin^2(2\pi m\,c_z)\,\mathrm{sinc}^2(mL)$, which rises as $m^2$ at low
+  $|H(m)|^2 \propto \sin^2(2\pi m c_z)\mathrm{sinc}^2(mL)$, which rises as $m^2$ at low
   wavenumber (differencing removes the mean). Against this floor the shear is signal-dominated to
   ≈ 6 m vertical scales, not the ≈ 50 m a flat floor implies. Rotary (CW/CCW) spectra of the
   complex shear resolve the up- and down-propagating internal-wave field.
