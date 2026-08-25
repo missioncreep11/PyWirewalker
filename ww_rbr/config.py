@@ -143,7 +143,8 @@ def load_config(path=None, assume_yes: bool = False) -> Config:
     p = _resolve_config(path, assume_yes=assume_yes)
     if not p.exists():
         raise FileNotFoundError(
-            f"config not found: {p}\nEdit config_ctd.json with your deployment paths and metadata.")
+            f"config not found: {p}\nCopy config_ctd.example.json to config_ctd.json and edit "
+            "it with your deployment paths and metadata.")
     with open(p) as f:
         cfg = json.load(f)
     gr = cfg.get("grid", {})

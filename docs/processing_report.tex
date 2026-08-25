@@ -381,10 +381,11 @@ Reproducibility & Script constants & Config-driven, unit-tested, provenance in a
 
 \appendix
 
-\section{Example CTD configuration (\code{config\_ctd.json})}
+\section{Example CTD configuration (\code{config\_ctd.example.json})}
 
-The reference deployment (NOPP-Aleutians). Every quantity discussed in Section~2 is set here;
-paths may use \code{\textasciitilde} and are overridable by environment variables.
+The generic template shipped in the repository; copy it to \code{config\_ctd.json} and edit.
+Every quantity discussed in Section~2 is set here; paths may use \code{\textasciitilde} and are
+overridable by environment variables.
 
 \begin{lstlisting}[style=cfg]
 {
@@ -407,10 +408,11 @@ paths may use \code{\textasciitilde} and are overridable by environment variable
 }
 \end{lstlisting}
 
-\section{Example ADCP configuration (\code{config\_adcp.json})}
+\section{Example ADCP configuration (\code{config\_adcp.example.json})}
 
-The reference template (TLC 2023). Every quantity discussed in Section~3 is set here; the
-instrument geometry is not, since it is read from the \code{.ad2cp}.
+The generic template shipped in the repository; copy it to \code{config\_adcp.json} and edit.
+Every quantity discussed in Section~3 is set here; the instrument geometry is not, since it is
+read from the \code{.ad2cp}.
 
 \begin{lstlisting}[style=cfg]
 {

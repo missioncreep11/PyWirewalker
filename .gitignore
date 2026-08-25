@@ -23,8 +23,12 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Full plots notebook (kept local; use wirewalker_ctd_processing.ipynb)
-wirewalker_ctd_plots.ipynb
+# Notebooks — analysis / deployment-specific, kept local, not distributed
+*.ipynb
+
+# Deployment config files — kept local; copy from the tracked config_*.example.json
+config_*.json
+!config_*.example.json
 
 # OS / editor
 .DS_Store

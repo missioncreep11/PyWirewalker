@@ -1,15 +1,17 @@
 {
-  "ad2cp_file": "~/TLC/2023/Wirewalker/Nortek/S101913A008_TLC_23.ad2cp",
-  "output_dir": "~/TLC/2023/Wirewalker/Nortek/processed",
-  "basename": "TLC_23_sig1000",
-  "mooring": "TLC_23",
-  "instrument": "Nortek Signature1000 S/N 101913",
+  "ad2cp_file": "/path/to/deployment.ad2cp",
+  "output_dir": "/path/to/output",
+  "basename": "MOORING_INSTRUMENT",
+  "mooring": "MOORING_NAME",
+  "instrument": "Nortek Signature1000 SN000000",
   "latitude": null,
   "longitude": null,
   "velocity": {
     "boxsize_m": 1.0,
     "z_max_m": null,
-    "motion_correct": true
+    "motion_correct": true,
+    "motion": "v1",
+    "attitude": "ahrs"
   },
   "turbulence": {
     "dep_res_m": 3.0,

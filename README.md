@@ -25,9 +25,7 @@ Nortek `.ad2cp`); the ADCP turbulence ε reproduces the published paper product 
 | `ww_sig1000/` | ADCP package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`, `index`) + tests |
 | `ww_sig1000/validation/` | turbulence reproducibility scripts (not part of the pipeline) |
 | `WW_Velocity_Processing_SWOT/` | MATLAB reference toolbox — kept local, not in the repo (from [`modscripps/wirewalker`](https://github.com/modscripps/wirewalker)) |
-| `config_ctd.json` | CTD deployment/machine settings (no paths hardcoded in code) |
-| `config_adcp.json` | ADCP deployment settings (paths, metadata, per-product params) |
-| `wirewalker_ctd_processing.ipynb`, `wirewalker_ctd_plots.ipynb` | CTD diagnostics |
+| `config_ctd.example.json`, `config_adcp.example.json` | generic config templates — copy to `config_ctd.json` / `config_adcp.json` and edit (your real configs and analysis notebooks stay local; they are gitignored, not distributed) |
 
 ## Environment
 
@@ -53,8 +51,8 @@ All deployment- and machine-specific settings live in **`config_ctd.json`** — 
 hardcoded. Point it at your `.rsk` and an output directory.
 
 ```bash
-# 1. configure: edit config_ctd.json -> rsk_file, output_dir, basename, lat/lon, atm pressure
-#    (paths may use ~; or override with env vars WW_RSK / WW_OUTPUT_DIR / WW_CONFIG)
+# 1. configure: cp config_ctd.example.json config_ctd.json   # then edit rsk_file, output_dir,
+#    basename, lat/lon, atm pressure  (paths may use ~; or override WW_RSK / WW_OUTPUT_DIR / WW_CONFIG)
 # 2. build the products  (L1 from the .rsk, then L2, L3 from the level below)
 python process_wirewalker_rbr.py --level all               # or --level 1 / 2 / 3
 python process_wirewalker_rbr.py --level all --config /path/to/other.json
@@ -122,9 +120,8 @@ is passed through under a name slugged from its long name (e.g. `backscatter`, `
 - **processing** — `sampling_hz`, `thermal_mass` (α/β/γ), `grid` (L2/L3 bin sizes, gap-fill),
   `n2_vertical_smoothing_m`, `gravity`.
 
-`config_ctd.json` is the default (NOPP-Aleutians reference deployment); `config_astral_ctd.json`
-is a second tracked example (ASTRAL_1) — process it with
-`process_wirewalker_rbr.py --level all --config config_astral_ctd.json`.
+The default config file is `config_ctd.json` (or `$WW_CONFIG`); process any other deployment
+with `--config <file>`. Start a new one by copying the tracked `config_ctd.example.json`.
 
 The plots notebook (`wirewalker_ctd_plots.ipynb`, loads L1/L2/L3/L3i) produces cast-flag
 checks, time–depth sections, T–S diagrams, deployment-mean profiles, N² sections, an
@@ -149,8 +146,8 @@ Instrument *geometry* (cell size, blanking, ambiguity velocity, sample rate) is 
 the config — it is read straight from the `.ad2cp` at run time.
 
 ```bash
-# 1. configure: edit config_adcp.json -> ad2cp_file, output_dir, basename, mooring, params
-#    (paths may use ~; override with env vars WW_AD2CP / WW_OUTPUT_DIR / WW_ADCP_CONFIG)
+# 1. configure: cp config_adcp.example.json config_adcp.json   # then edit ad2cp_file, output_dir,
+#    basename, mooring, params  (paths may use ~; override WW_AD2CP / WW_OUTPUT_DIR / WW_ADCP_CONFIG)
 
 # 2. build a product (config-driven; output name derived from basename + grid)
 python process_ww_sig1000.py --product velocity      # motion-corrected ENU currents (slant beams)
