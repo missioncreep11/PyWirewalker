@@ -141,7 +141,7 @@ two `(depth, cast)` L2 products: **velocity** (motion-corrected ENU currents and
 from the four slant beams) and **turbulence** (spectral and structure-function dissipation ε from
 the fifth, high-resolution beam). This chain is a Python port of a MATLAB toolbox
 ([`modscripps/wirewalker`](https://github.com/modscripps/wirewalker); Zheng, Lucas, Le Boyer,
-Northcott). Improvements introduced *during the port* are marked **★**.
+Northcott, Griffin). Improvements introduced *during the port* are marked **★**.
 
 ### Ingest and streaming
 
