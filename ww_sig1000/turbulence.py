@@ -133,14 +133,75 @@ def hr_bins(cellsize, dep_res, max_dep):
     return centres, dep_res
 
 
+# second-order structure-function constant in D(r) = N + C_SF eps^2/3 r^2/3.
+# Literature C_v^2 ~ 2.0-2.1 (Wiles et al. 2006), but that leaves the SF eps ~0.20 dex
+# below the spectral eps. C_SF is cross-calibrated to the validated spectral eps on the
+# high-scattering TLC deployment (median offset zeroed over high-SNR bins <80 m), so the
+# two estimators share one absolute scale. Note: eps-N coupling (the QC use) is invariant
+# to C_SF, so this only sets the absolute level.
+C_SF = 1.476
+
+
+def _structure_function_profile(vel_use, z_use, centres, *, cellsize, dep_res,
+                                fit_lags=15, min_ref_pings=6):
+    """Second-order velocity structure function eps per depth bin (WWturb_upward.m).
+
+    For each grid depth, take each ping's cell nearest that depth as the anchor and
+    accumulate D(r) = <(v(anchor) - v(anchor +/- r))^2> over both sides and all pings,
+    counting only valid (non-NaN) pairs (no zero-filling — unlike the spectral path).
+    Fit D(r) = N + A r^2/3 over the first `fit_lags` lags; eps = (A/C_SF)^3/2.
+    Returns (eps, N, A) arrays on `centres`.
+    """
+    vel_use = np.asarray(vel_use, float)
+    npings, ncols = vel_use.shape
+    vel_inds = min(int(round(dep_res / cellsize / 2)), ncols - 1)
+    nb = centres.size
+    eps = np.full(nb, np.nan); Nsf = np.full(nb, np.nan); Asf = np.full(nb, np.nan)
+    if vel_inds < 3:
+        return eps, Nsf, Asf
+    r = cellsize * np.arange(1, vel_inds + 1)
+    nfit = int(min(fit_lags, vel_inds))
+    G = np.column_stack([np.ones(nfit), r[:nfit] ** (2.0 / 3.0)])
+    # squared velocity differences at each lag L (v[c]-v[c+L])^2, reused for both sides
+    sq = [(vel_use[:, :ncols - L] - vel_use[:, L:]) ** 2 for L in range(1, vel_inds + 1)]
+    pidx = np.arange(npings)
+    for ib, zc in enumerate(centres):
+        ref = np.argmin(np.abs(z_use - zc), axis=1)                    # nearest cell / ping
+        good = (np.abs(z_use[pidx, ref] - zc) <= cellsize / 2) & (ref > 0) & (ref < ncols - 1)
+        if good.sum() < min_ref_pings:
+            continue
+        gp, rc = pidx[good], ref[good]
+        D = np.full(vel_inds, np.nan)
+        for li, L in enumerate(range(1, vel_inds + 1)):
+            vals = []
+            up = rc <= ncols - 1 - L
+            if up.any():
+                vals.append(sq[li][gp[up], rc[up]])                    # (v[c]-v[c+L])^2
+            dn = rc - L >= 0
+            if dn.any():
+                vals.append(sq[li][gp[dn], rc[dn] - L])                # (v[c-L]-v[c])^2
+            if vals:
+                allv = np.concatenate(vals)
+                if np.isfinite(allv).any():
+                    D[li] = np.nanmean(allv)
+        y = D[:nfit]; m = np.isfinite(y)
+        if m.sum() < 3:
+            continue
+        coeffs, *_ = np.linalg.lstsq(G[m], y[m], rcond=None)
+        Nsf[ib], Asf[ib] = float(coeffs[0]), float(coeffs[1])
+        if Asf[ib] > 0:
+            eps[ib] = (Asf[ib] / C_SF) ** 1.5
+    return eps, Nsf, Asf
+
+
 # --------------------------------------------------------------------------- #
 # Per-cast spectral turbulence
 # --------------------------------------------------------------------------- #
 def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
                             cellsize, blockdis, dep_res=3.0, max_dep=100.0,
-                            time=None, corr_min=50, fit_min_k=0.5, min_specs=6,
+                            time=None, amp=None, corr_min=50, fit_min_k=0.5, min_specs=6,
                             spec_floor=1e-8, skip_cells=14, deep_thresh=50.0,
-                            phi_deg=90.0, azi_deg=0.0):
+                            phi_deg=90.0, azi_deg=0.0, structure_function=True):
     """Spectral eps for one HR beam-5 upcast (port of ProcessSingleProfile.m).
 
     vel, corr : (npings, ncells) HR beam-5 velocity / correlation.
@@ -190,6 +251,7 @@ def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
     vel_use = _detrend_rows_nan(vel_z[:, sl])
     z_use = z_coord[:, sl]
     corr_use = corr[:, sl].astype(float)
+    amp_use = np.asarray(amp, float)[:, sl] if amp is not None else None
     ncols = vel_use.shape[1]
 
     # 8. common wavenumber grid + band edges (ProcessSingleProfile: ks_len from data)
@@ -197,7 +259,8 @@ def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
     ks, klo, khi = _k_grid(cellsize, ks_len)
     centres, win = hr_bins(cellsize, dep_res, max_dep)
     nb, nk = centres.size, ks.size
-    out = {k: np.full(nb, np.nan) for k in ("eps", "N", "SNR", "A", "corr", "num")}
+    out = {k: np.full(nb, np.nan) for k in
+           ("eps", "N", "SNR", "A", "corr", "num", "amp", "eps_sf", "N_sf", "A_sf")}
     spec_out = np.full((nb, nk), np.nan)
     fit_cut = int(np.flatnonzero(ks < fit_min_k)[-1] + 1) if np.any(ks < fit_min_k) else 1
 
@@ -236,8 +299,16 @@ def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
             out["SNR"][i] = A / N if N else np.nan
             out["A"][i] = A
             out["corr"][i] = np.nanmean(corr_use[dep_mask])
+            if amp_use is not None:
+                out["amp"][i] = np.nanmean(amp_use[dep_mask])
             out["num"][i] = num_specs
             spec_out[i] = spec_fit
+
+    # 10. structure-function eps on the same depth grid (shares all preprocessing;
+    #     computed from velocity differences, so gaps are skipped not zero-filled)
+    if structure_function:
+        out["eps_sf"], out["N_sf"], out["A_sf"] = _structure_function_profile(
+            vel_use, z_use, centres, cellsize=cellsize, dep_res=dep_res)
 
     out["spec"] = spec_out
     out["z"] = centres

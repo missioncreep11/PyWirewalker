@@ -2,7 +2,32 @@
 import numpy as np
 
 from ww_sig1000.turbulence import (fit_kolmogorov, epsilon_from_A, angular_demean,
-                                    _raw_spectrum, _k_grid, hr_bins, C_K)
+                                    _raw_spectrum, _k_grid, hr_bins, C_K,
+                                    _structure_function_profile)
+
+
+def test_sf_white_noise_is_all_noise_floor():
+    # white noise -> D(r) = 2 sigma^2 flat -> all variance in the N intercept, A ~ 0
+    rng = np.random.default_rng(0)
+    cs, npings, ncols, sig = 0.06, 600, 64, 0.01
+    z = np.tile(cs * np.arange(ncols), (npings, 1))
+    w = rng.normal(0, sig, (npings, ncols))
+    eps, N, A = _structure_function_profile(w, z, np.array([2.0]), cellsize=cs, dep_res=1.0)
+    assert abs(A[0]) < 5e-5                       # negligible turbulence slope
+    assert np.isclose(N[0], 2 * sig ** 2, rtol=0.3)   # intercept = 2 sigma^2
+
+
+def test_sf_recovers_turbulent_slope():
+    # a k^-5/3 field (Hurst 1/3) has D(r) ~ r^2/3 -> positive A, finite eps
+    rng = np.random.default_rng(1)
+    cs, npings, ncols, sig = 0.06, 800, 64, 0.01
+    z = np.tile(cs * np.arange(ncols), (npings, 1))
+    k = np.fft.rfftfreq(ncols); k[0] = k[1]
+    ph = rng.uniform(0, 2 * np.pi, (npings, len(k)))
+    f = np.fft.irfft((k ** (-5.0 / 6.0))[None, :] * np.exp(1j * ph), n=ncols, axis=1)
+    f *= sig / f.std()
+    eps, N, A = _structure_function_profile(f, z, np.array([2.0]), cellsize=cs, dep_res=1.0)
+    assert A[0] > 0 and np.isfinite(eps[0])
 
 
 def test_fit_kolmogorov_recovers_N_A():

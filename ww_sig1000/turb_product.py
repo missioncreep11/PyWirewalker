@@ -18,7 +18,7 @@ from .casts import detect_casts
 from .l2 import _count_ensembles
 from .turbulence import process_cast_turbulence, hr_bins
 
-_VARS = ("eps", "N", "SNR", "A", "corr", "num")
+_VARS = ("eps", "N", "SNR", "A", "corr", "num", "eps_sf", "N_sf", "A_sf")
 
 
 def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source):
@@ -51,7 +51,14 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
          "corr": (("depth", "cast"), G["corr"],
                   {"units": "percent", "long_name": "beam-5 correlation, bin mean"}),
          "num_spectra": (("depth", "cast"), G["num"].astype(np.float32),
-                         {"long_name": "spectra averaged per bin"})},
+                         {"long_name": "spectra averaged per bin"}),
+         "epsilon_sf": (("depth", "cast"), G["eps_sf"],
+                        {"units": "W kg-1", "long_name": "TKE dissipation rate "
+                         "(second-order structure function, D(r)=N+A r^2/3)"}),
+         "N_sf": (("depth", "cast"), G["N_sf"],
+                  {"units": "(m s-1)2", "long_name": "structure-function noise offset (r->0)"}),
+         "A_sf": (("depth", "cast"), G["A_sf"],
+                  {"long_name": "structure-function amplitude (C_SF eps^2/3)"})},
         coords={"depth": ("depth", zc.astype(np.float32), {"units": "m", "positive": "down"}),
                 "cast": ("cast", np.arange(ncast, dtype=np.int32)),
                 "time": ("cast", ctime, {"long_name": "cast mid-time"}),
@@ -65,9 +72,12 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
         attrs={"title": f"{mooring} Wirewalker ADCP HR turbulence (spectral eps)",
                "mooring": mooring, "source_file": source,
                "n_casts_truncated": n_trunc,
-               "method": "wavenumber-spectrum, S(k)=N+A k^-5/3, eps=(A/0.53)^3/2",
+               "method": "spectral: S(k)=N+A k^-5/3, eps=(A/0.53)^3/2 (epsilon); "
+                         "structure-function: D(r)=N+A r^2/3, eps=(A/C_SF)^3/2 (epsilon_sf, "
+                         "gap-skipping, more robust in low scattering)",
                "dep_res_m": dep_res, "max_dep_m": max_dep, "corr_min": corr_min,
-               "processing": "ww_sig1000 port of ProcessSingleProfile.m (Northcott et al. 2026)",
+               "processing": "ww_sig1000 port of ProcessSingleProfile.m + WWturb_upward.m SF "
+                             "(Northcott et al. 2026)",
                "date_created": _time.strftime("%Y-%m-%dT%H:%M:%S")},
     )
 
