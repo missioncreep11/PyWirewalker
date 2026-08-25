@@ -1,0 +1,453 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{textcomp}
+\usepackage[hidelinks]{hyperref}
+\usepackage{listings}
+\lstdefinestyle{cfg}{basicstyle=\ttfamily\footnotesize, breaklines=true,
+  columns=fullflexible, keepspaces=true, showstringspaces=false,
+  frame=single, framesep=5pt, xleftmargin=4pt, aboveskip=6pt, belowskip=4pt}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\eps}{\varepsilon}
+
+\title{\textbf{Wirewalker Data Processing: Methods and Implementation}}
+\author{PyWirewalker}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+PyWirewalker provides processing pipelines for the instruments carried on a wave-powered
+Wirewalker profiling mooring. This report documents the processing architecture, the RBR
+Concerto CTD chain, and the Nortek Signature1000 ADCP chain, with particular emphasis on the
+improvements introduced when the ADCP toolbox was ported from its original MATLAB
+implementation to Python. The code, configuration templates, and this report are openly
+available at \url{https://github.com/missioncreep11/PyWirewalker}.
+\end{abstract}
+
+\section{Processing architecture (L0--L3)}
+
+The pipeline follows a staged \textbf{level (L0--L3)} convention in which each level is a
+self-describing NetCDF product derived deterministically from the level below it. Raw
+instrument files are never modified; every derived quantity is reproducible from the raw
+data and a single version-controlled configuration file.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{0.07\textwidth} p{0.42\textwidth} p{0.40\textwidth}@{}}
+\toprule
+\textbf{Level} & \textbf{Content} & \textbf{Character} \\
+\midrule
+\textbf{L0} & Raw instrument file (RBR \code{.rsk}, Nortek \code{.ad2cp}) & Vendor binary; read-only, never edited \\
+\textbf{L1} & Full-resolution converted time series & Physical units, per-sample cast/profile flags \\
+\textbf{L2} & Gridded per-cast product, dimensioned \code{(depth, cast)} & QC applied, derived variables, one profile per column \\
+\textbf{L3} & Regular \code{(depth, time)} grid & Uniform time base for spectral/temporal analysis \\
+\bottomrule
+\end{tabular}
+\caption{Processing levels.}
+\end{table}
+
+Two design principles are common to both instruments:
+
+\begin{enumerate}
+\item \textbf{Strict downward dependence.} $\mathrm{L}(n)$ reads only $\mathrm{L}(n-1)$ ---
+never the raw file --- so a given level can inherit only the variables present in the level
+beneath it. This makes the provenance of every field explicit and prevents silent
+reprocessing from source.
+
+\item \textbf{Configuration, not code, carries deployment specifics.} All deployment- and
+machine-specific settings (paths, metadata, calibration constants, grid parameters) live in
+a JSON configuration file --- \code{config\_ctd.json} for the CTD, \code{config\_adcp.json}
+for the ADCP. No paths or constants are hard-coded; the resolved values are written into the
+output NetCDF attributes for provenance. A single driver processes any deployment by pointing
+it at the appropriate config (\code{--config}), with individual settings overridable on the
+command line. Consequently, every deployment-specific quantity quoted in this report ---
+sample rate, grid spacings, correction parameters, QC thresholds, and metadata --- is a
+configuration default for the reference deployment, and the governing key is named where each
+value first appears.
+\end{enumerate}
+
+The \code{(depth, cast)} convention for L2 is shared by the CTD and ADCP: each column is one
+profile (upcast), each row a depth bin, and a \code{time} coordinate carries the cast
+mid-time. This common structure lets CTD, velocity, and turbulence products be co-registered
+by cast and depth without interpolation. The two instrument chains are otherwise independent
+--- different raw formats, different drivers, different physics --- and are described in turn
+below.
+
+\section{CTD processing --- RBR Concerto}
+
+The CTD chain (\code{ww\_rbr/}, driver \code{process\_wirewalker\_rbr.py}) converts a raw RBR
+Concerto \code{.rsk} file into an L1--L3 archive. The reference deployment is mooring
+\textbf{NOPP-Aleutians} (RBR Concerto\textsuperscript{3} S/N 213752, 2~Hz continuous,
+$\approx 5.3\times10^{7}$ scans over 2025-07 to 2026-05).
+
+\subsection{Cast detection}
+
+Profiles are not re-detected; the chain reuses the instrument-generated segmentation stored
+in the Ruskin \code{region}\,/\,\code{regionCast} tables. Each profile is split into a
+\emph{down cast} (the slow, ratcheting descent as the vehicle sinks) and an \emph{up cast}
+(the fast, buoyant ascent). Only \textbf{upcasts} are retained for gridded products: the CTD
+is mounted on top of the vehicle and sits in its turbulent wake during descent, so downcasts
+are systematically contaminated. Up/down agreement is therefore never used as a quality
+metric.
+
+\subsection{L1 --- full-resolution conversion}
+
+\code{build\_L1} reads the raw \code{.rsk} (a SQLite database) and writes the full-rate time
+series in physical units at whatever rate the instrument was configured to sample. The
+sample rate is not assumed anywhere in the chain --- it is read from the \code{.rsk} and
+carried through as the \code{sampling\_hz} configuration item (2~Hz for the reference
+deployment above, but arbitrary in general; other deployments in this project run at 6 and
+8~Hz). The measured channels are \textbf{discovered from the
+instrument metadata tables} (\code{channels}, \code{instrumentChannels}) rather than
+hard-coded, so auxiliary sensors (optical backscatter, chlorophyll fluorescence, dissolved
+oxygen, PAR, a second thermistor, \dots) are carried through automatically under names
+slugged from their long names. Three channels receive canonical names for the downstream
+TEOS-10 step: conductivity, the \code{temp14} C--T-cell thermistor, and total pressure. Every
+sample is tagged with \code{cast\_number}, \code{profile\_number}, and \code{cast\_direction}
+($0=$ down, $1=$ up). Conductivity is stored raw at L1; no thermal-mass correction is applied
+at this stage.
+
+\subsection{L2 --- gridded upcasts, thermodynamics, and de-spiking}
+
+\code{build\_L2} reads the \textbf{L1 NetCDF} (not the raw file), selects upcasts, and
+bin-averages each onto a vertical grid whose bin size and extent are config items
+(\code{l2\_dz\_m}, \code{zmin\_m}, \code{zmax\_m}; 0.5~m bins over 0--500~m for the reference
+deployment). Two corrections are
+applied per cast before gridding:
+
+\begin{itemize}
+\item \textbf{Conductivity-cell thermal-mass correction} (Lueck \& Picklo, 1990), addressing
+the thermal inertia of the conductivity cell that otherwise produces salinity spikes at sharp
+thermal gradients. The recursive correction uses the parameters in the config \code{thermal\_mass} block, which
+default to the RBR \code{pyRSKtools} values $\alpha = 0.04$, $\beta = 0.1~\mathrm{s^{-1}}$
+($\tau \approx 10$~s), $\gamma = 1.0$. Fitting
+$\tau$ freely is ill-posed on these profiles (the estimate runs away and biases the profile),
+so the fixed manufacturer parameters are used and recorded in the L2 attributes.
+
+\item \textbf{Conductivity--temperature alignment.} The optimal C--T lag was measured at
+$\approx 0$~s across the deployment (the Concerto's C and T channels are already aligned), so
+no lag shift is applied.
+\end{itemize}
+
+Thermodynamic variables are then derived with the TEOS-10 Gibbs SeaWater toolbox
+(\code{gsw}): sea pressure $p = p_{\mathrm{total}} - p_{\mathrm{atm}}$ (with the atmospheric
+offset $p_{\mathrm{atm}}$ set in the config, \code{atmospheric\_pressure\_dbar}, defaulting to
+the \code{.rsk} \code{ATMOSPHERE} value of 10.1325~dbar), depth from \code{gsw.z\_from\_p},
+practical salinity \code{SP\_from\_C}, absolute salinity, conservative temperature, potential
+density anomaly $\sigma_0$, and sound speed --- the latitude and longitude required by the gsw
+conversions likewise taken from the config (\code{latitude}, \code{longitude}). The L2 product carries
+these together with the bin-averaged auxiliary channels and a per-bin sample count
+\code{n\_obs}, dimensioned \code{(depth, cast)}.
+
+\subsection{L3 --- regular depth--time grid and stratification}
+
+\code{build\_L3} reads L2 and interpolates onto a regular depth--time grid whose vertical and
+temporal spacing are set in the configuration file (\code{l3\_dz\_m} and \code{l3\_dt};
+\textbf{1~m $\times$ 30~min} for the reference deployment, chosen to match its cast cadence). The native upcast cadence ($\approx 31$~min) gives roughly one profile per
+time bin (Nyquist $\approx 1$~cph); $\approx 88\%$ of bins contain a single upcast,
+$\approx 4\%$ two or more, and $\approx 8\%$ are empty. Empty bins are left \textbf{NaN --- no
+temporal interpolation} --- in the archival product to preserve sample independence; a
+companion \code{\_interp} product fills only isolated single-bin gaps
+($\le$ the config \code{l3\_interp\_max\_gap\_bins}) by linear interpolation in time, flagging filled bins with
+\code{n\_casts == 0}.
+
+The squared buoyancy frequency is computed on the L3 grid as
+\begin{equation}
+N^{2} = \frac{g}{\rho_0}\,\frac{\partial \sigma_0}{\partial z},
+\end{equation}
+with $z$ positive down (so $N^2 > 0$ is stable) and $g$ the config \code{gravity}, using the
+gridded $\sigma_0$ field after a NaN-aware boxcar vertical smooth whose length is the config
+\code{n2\_vertical\_smoothing\_m} (5~m for the reference deployment, selected from a
+gradient-smoothing comparison that removes most differentiation noise while preserving the
+pycnocline peak, and recorded in the product attributes).
+
+\section{ADCP processing --- Nortek Signature1000}
+
+The ADCP chain (\code{ww\_sig1000/}, driver \code{process\_ww\_sig1000.py}) processes the raw
+Nortek \code{.ad2cp} file into two \code{(depth, cast)} L2 products: \textbf{velocity}
+(motion-corrected ENU currents and vertical shear from the four slant beams) and
+\textbf{turbulence} (spectral and structure-function dissipation $\eps$ from the fifth,
+high-resolution beam). This chain is a Python port of a MATLAB toolbox (Zheng, Lucas,
+Le~Boyer, and Northcott; upstream \code{modscripps/wirewalker}). The remainder of this section
+describes the port and, throughout, highlights where it corrects or extends the original.
+
+\subsection{Ingest and streaming architecture}
+
+\textbf{Improvement --- direct raw ingest.} The original workflow required an intermediate
+Nortek \code{.mat} export followed by bespoke \code{sort\_file}\,/\,\code{merge\_signature}
+reassembly steps. The port reads the raw \code{.ad2cp} directly through MHKiT/DOLfYN
+(\code{from mhkit import dolfyn}), which parses the native binary and exposes the slant-beam
+burst, the fifth-beam high-resolution (HR) burst, the IMU/AHRS records, and the instrument
+geometry (cell size, blanking distance, ambiguity velocity, beam angle, sample rate). The
+export and reassembly stages are thereby eliminated, removing a lossy, manual step from the
+pipeline.
+
+\textbf{Improvement --- bounded-memory streaming.} Deployment files routinely exceed 10~GB
+(the reference NOPP file is $\approx 38$~GB\,/\,$4\times10^{7}$ ensembles). The driver streams
+the file in ensemble chunks (the chunk size is the config \code{chunk}), detecting casts on a
+rolling pressure buffer and carrying any cast that spans a chunk boundary into the next read,
+so memory use is bounded by the chunk size rather than the file size. Optional bounds set in
+the config (\code{start\_time}/\code{end\_time}, or their ensemble equivalents) trim
+deployment/recovery transit. Instrument geometry is read from the file itself and is therefore
+never a configuration item.
+
+\subsection{Velocity and shear (slant beams)}
+
+Currents are formed by the standard beam $\to$ instrument (XYZ) $\to$ Earth (ENU)
+transformation of the four slant beams, after a correlation-threshold mask (config
+\code{corr\_min}), depth-alignment of the per-beam cells using the tilt-corrected cell
+geometry, and box-averaging onto a uniform depth grid whose bin size and maximum depth are
+config items (\code{boxsize\_m}, \code{z\_max\_m}; 1~m by default). The casts gridded are those
+selected by direction and minimum pressure span (config \code{kind} and \code{min\_span\_dbar}).
+Two motion-correction models are provided:
+
+\begin{itemize}
+\item \textbf{v1} --- a port of the original \code{WWcorr\_beam}: bandpass-integrated IMU
+acceleration plus the pressure-rate ($dp/dt$) ascent, rotated by the AHRS attitude.
+\item \textbf{v2 (improvement)} --- a buoyant-ascent model in which the vertical velocity is
+taken from $dp/dt$, the horizontal platform motion is depth-gated, and the tilt is derived
+from low-passed accelerometer data. This model is immune to AHRS attitude faults and adds a
+\textbf{sail correction} for the along-wire travel of the vehicle on an inclined mooring line.
+The attitude source is selectable (\code{ahrs}, \code{reconstructed}, or \code{auto}, which
+reconstructs only on AHRS-faulted casts) and is recorded per cast. The model (\code{motion}),
+whether any motion correction is applied (\code{motion\_correct}), and the attitude source
+(\code{attitude}) are all configuration selections.
+\end{itemize}
+
+\textbf{Improvement --- motion-immune shear.} In addition to gridded velocity, the L2 product
+carries a \textbf{beam-differenced vertical shear} (\code{shearE}, \code{shearN}), a port of
+the toolbox's \code{beamshear}. Centred cell differences
+$(v_{c+1}-v_{c-1})/(z_{c+1}-z_{c-1})$ are formed \textbf{along each raw beam before rotation}.
+Any quantity common to a ping's cells --- platform translation, attitude-error leakage of the
+ascent, the sail term --- cancels exactly in the difference, so the beam shear is immune to
+the entire motion/attitude error family and requires no motion correction. The four beam
+shears are then rotated to ENU (differentiation being linear) and box-averaged. Each velocity
+and shear bin carries a Doppler-noise standard error (\code{\_sem}), enabling quantitative
+signal-to-noise assessment (Section~\ref{sec:qc}).
+
+\subsection{Turbulence --- spectral method (HR beam 5)}
+
+Dissipation is estimated from the pulse-coherent HR fifth beam, which points along the
+vertical and resolves fine-scale vertical velocity. The per-cast pipeline is:
+
+\begin{enumerate}
+\item Mask low-correlation samples (config \code{corr\_min}); convert velocity to phase,
+unwrap, and remove the ensemble mean rotation (\emph{angular demean}), which suppresses
+alias-correction spikes.
+\item Compute each cell's vertical position $z = p - b_Z\,r$ from the tilt-corrected beam
+geometry.
+\item Estimate and remove the \emph{stagnation profile}: the median velocity profile over the
+deep (high-pressure) portion of the cast, subtracted from every ping; the near-transducer
+cutoff is the first cell where the deep median returns to within $4~\mathrm{mm\,s^{-1}}$ of its
+own median, selected nearest 1~m range.
+\item De-spike (single points with large $|dv/dz|$ on both sides) and detrend in range.
+\item Form band-averaged vertical-wavenumber spectra $S(k)$ over depth bins (bin resolution
+\code{dep\_res\_m} and maximum depth \code{max\_dep\_m} from the config) and fit the Kolmogorov
+inertial-subrange model
+\begin{equation}
+S(k) = N + A\,k^{-5/3}, \qquad
+\eps = \left(\frac{A}{C_K}\right)^{3/2},\quad C_K = 0.53,
+\end{equation}
+where $N$ is the (white) spectral noise floor and $A$ the inertial-subrange amplitude.
+\end{enumerate}
+
+\textbf{Improvement --- correct reference implementation.} The vendored script
+\code{WWturb\_upward.m} had diverged from the method actually published by the instrument
+authors and produced a systematic \textbf{$+0.28$~dex} high bias in $\eps$. The port instead
+reproduces \code{ProcessSingleProfile.m} --- the final paper code from Northcott et al.\ (Dryad
+\href{https://doi.org/10.5061/dryad.8sf7m0d44}{\code{doi:10.5061/dryad.8sf7m0d44}}). The key
+corrections relative to the vendored script are: band-averaged spectra (rather than
+interpolated), the data-dependent wavenumber-grid length, the deep-profile stagnation
+subtraction (absent in the vendored code), the cutoff-nearest-1~m rule with a pressure-based
+deep threshold, and removal of an extraneous averaging mask.
+
+\textbf{Validation.} Against Northcott et al.'s published product
+\code{NortekTurbulenceData.nc} for the full TLC 2023 deployment (2116 profiles $\times$ 67
+depth bins at 3~m resolution), the ported spectral $\eps$ reproduces the published values with
+a \textbf{median offset of $-0.00$~dex, RMS $\approx 0.08$~dex, and correlation of
+$\log\eps$ of $0.994$}, and yields exactly the published profile count. The gold-standard
+single profile (\code{RawProfile2\_20231005-1132.nc}) matches to $-0.00$~dex. This
+bit-for-bit agreement anchors the port to the peer-reviewed result.
+
+\subsection{Turbulence --- structure-function method (new)}
+
+\textbf{Improvement --- a second, gap-robust estimator.} The port additionally implements the
+second-order velocity structure-function method (a port of the SF branch of
+\code{WWturb\_upward.m}) as a parallel estimate computed from the same preprocessed velocity.
+The structure function is accumulated over both sides of each depth bin, counting only valid
+sample pairs, and fit as
+\begin{equation}
+D(r) = N + A\,r^{2/3}, \qquad
+\eps = \left(\frac{A}{C_{SF}}\right)^{3/2}.
+\end{equation}
+The absolute constant $C_{SF}$ is cross-calibrated to the validated spectral $\eps$ on the
+high-scattering TLC deployment ($C_{SF} = 1.476$; the literature value is $\approx 2.0$), so
+that the two estimators share one absolute scale. The spectral and SF estimates
+(\code{epsilon}, \code{epsilon\_sf}) are stored side by side in the product.
+
+The value of the second estimator is specific to \textbf{low-scattering environments}. The
+spectral method zero-fills correlation-masked (gap) samples before the FFT; in high-return
+water this is negligible ($\approx 8\%$ of cells masked at TLC), but in low-return water it
+injects spurious broadband variance that raises the apparent noise floor. The structure
+function, computed from velocity differences over valid pairs only, \textbf{skips gaps rather
+than filling them}. On a low-scattering deployment (NOPP, beam-5 correlation $\approx 68\%$,
+$\approx 30$--$45\%$ of cells masked), the two estimators agree only weakly, and the difference
+is diagnostic --- see the quality framework below.
+
+\subsection{Quality framework and diagnostics (new)}
+\label{sec:qc}
+
+The port introduces several quantitative quality measures that were not part of the original
+toolbox.
+
+\paragraph{$\eps$--noise-floor coupling.} Genuine turbulence should vary independently of the
+instrument noise floor; where $\eps$ instead tracks $N$, it is being set by the instrument
+rather than the ocean. The per-bin correlation $r(\log\eps, \log N)$ therefore serves as a
+contamination diagnostic. Calibration on the validated (high-scattering) TLC deployment gives
+$r \approx -0.3$ --- the mild \emph{negative} value expected from the intrinsic $N$--$A$
+trade-off of the two-parameter fit --- with no diel structure. The low-scattering NOPP
+deployment instead shows $r$ rising to $+0.6$ to $+0.9$ with depth, and a diel $\eps$ cycle in
+the upper ocean \textbf{locked to the noise floor} ($r \approx 0.95$), identifying a biological
+(diel vertical migration) contamination of the near-surface estimate and an increasingly
+noise-limited deep estimate. The structure-function estimator \textbf{removes the gap-driven
+component} of this coupling in mid-water (driving $r$ from $\approx +0.45$ to $\approx 0$),
+extending the trustworthy depth range; the residual deep coupling reflects genuine biological
+scattering, which no estimator can remove.
+
+\paragraph{Transfer-function noise floor for shear.} A flat (white) noise floor derived from
+the per-bin SEM is \emph{not} the correct floor for beam-differenced shear: the differencing
+operator $(v_{c+1}-v_{c-1})$ and the box-average shape the noise spectrally. The correct
+vertical-wavenumber noise floor is the white per-sample Doppler variance passed through the
+processing transfer function,
+\begin{equation}
+|H(m)|^{2} \propto \sin^{2}\!\left(2\pi m\,c_z\right)\,
+\operatorname{sinc}^{2}\!\left(m L\right),
+\end{equation}
+with $c_z$ the vertical cell projection and $L$ the box-average length, normalized so its
+integral equals the SEM variance. Because differencing removes the mean, this floor rises as
+$m^{2}$ at low wavenumber --- the Doppler noise is negligible at large vertical scales. On
+NOPP this places the shear signal-to-noise above unity out to vertical scales of
+$\approx 6$~m (SNR of order $10^{2}$--$10^{3}$ at internal-wave scales), rather than the
+$\approx 50$~m that a flat floor misleadingly implies. Rotary (clockwise/counter-clockwise)
+wavenumber spectra of the complex shear, computed against this floor, resolve the upward- and
+downward-propagating internal-wave shear field.
+
+\subsection{Software engineering and reproducibility (improvements)}
+
+The port also modernizes the pipeline as software:
+
+\begin{itemize}
+\item \textbf{Configuration-driven, symmetric with the CTD.} Deployment settings live in
+\code{config\_adcp.json}; CLI flags override individual values; the resolved settings are
+stamped into product attributes.
+\item \textbf{Unit-tested numerics.} The transforms, geometry, cast detection, spectral fit,
+and structure-function fit are covered by a fast, data-free test suite (white noise $\to$ zero
+turbulent amplitude; a synthetic $k^{-5/3}$ field $\to$ the correct slope; etc.), run
+alongside the CTD tests.
+\item \textbf{Validated against the published product} (Section 3.3), with the comparison
+scripts retained under \code{ww\_sig1000/validation/}.
+\item \textbf{Crash-safe output.} Products are written to a temporary file and atomically
+renamed into place, so a failed or interrupted write never truncates an existing product, and
+the swap succeeds even while a reader (e.g.\ an open analysis notebook) holds the previous
+file.
+\end{itemize}
+
+\section{Summary of ADCP port improvements}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{0.16\textwidth} p{0.36\textwidth} p{0.40\textwidth}@{}}
+\toprule
+\textbf{Area} & \textbf{Original MATLAB toolbox} & \textbf{PyWirewalker port} \\
+\midrule
+Ingest & \code{.mat} export $+$ \code{sort\_file}/\code{merge\_signature} & Direct \code{.ad2cp} read via DOLfYN; bounded-memory streaming \\
+Turbulence (spectral) & \code{WWturb\_upward.m} ($+0.28$~dex bias) & \code{ProcessSingleProfile.m} method; validated to $-0.00$~dex / corr 0.994 \\
+Turbulence (2nd estimator) & Present but unused & Structure-function $\eps$ in every product; gap-robust in low scattering \\
+Shear & --- & Beam-differenced, motion-immune shear $+$ per-bin Doppler SEM \\
+Motion correction & Single AHRS-based model & v1/v2 models; buoyant-ascent $+$ sail correction; selectable/auto attitude \\
+Quality control & --- & $\eps$--noise-floor coupling; transfer-function shear noise floor; rotary spectra \\
+Reproducibility & Script constants & Config-driven, unit-tested, provenance in attrs, atomic writes \\
+\bottomrule
+\end{tabular}
+\caption{Improvements introduced during the MATLAB-to-Python port of the ADCP toolbox.}
+\end{table}
+
+\appendix
+
+\section{Example CTD configuration (\code{config\_ctd.json})}
+
+The reference deployment (NOPP-Aleutians). Every quantity discussed in Section~2 is set here;
+paths may use \code{\textasciitilde} and are overridable by environment variables.
+
+\begin{lstlisting}[style=cfg]
+{
+  "rsk_file": "/path/to/deployment.rsk",
+  "output_dir": "/path/to/output",
+  "basename": "NOPP-Aleutians_RBR-Concerto-213752",
+  "mooring": "NOPP-Aleutians",
+  "instrument": "RBRconcerto3 S/N 213752",
+  "latitude": 49.5,
+  "longitude": -159.0,
+  "atmospheric_pressure_dbar": 10.1325,
+  "sampling_hz": 2.0,
+  "thermal_mass": { "alpha": 0.04, "beta_per_s": 0.1, "gamma": 1.0 },
+  "grid": {
+    "l2_dz_m": 0.5, "zmin_m": 0.0, "zmax_m": 500.0,
+    "l3_dz_m": 1.0, "l3_dt": "30min", "l3_interp_max_gap_bins": 1
+  },
+  "n2_vertical_smoothing_m": 5.0,
+  "gravity": 9.81
+}
+\end{lstlisting}
+
+\section{Example ADCP configuration (\code{config\_adcp.json})}
+
+The reference template (TLC 2023). Every quantity discussed in Section~3 is set here; the
+instrument geometry is not, since it is read from the \code{.ad2cp}.
+
+\begin{lstlisting}[style=cfg]
+{
+  "ad2cp_file": "/path/to/deployment.ad2cp",
+  "output_dir": "/path/to/output",
+  "basename": "TLC_23_sig1000",
+  "mooring": "TLC_23",
+  "instrument": "Nortek Signature1000 S/N 101913",
+  "latitude": null,
+  "longitude": null,
+  "velocity":   { "boxsize_m": 1.0, "z_max_m": null, "motion_correct": true },
+  "turbulence": { "dep_res_m": 3.0, "max_dep_m": 100.0 },
+  "cast":       { "kind": null, "min_span_dbar": 40.0, "corr_min": 50, "chunk": 500000 }
+}
+\end{lstlisting}
+
+\noindent Two groups of keys are optional and take defaults when absent: the velocity
+attitude/motion-model selection (Section~3.2) and the record-trim bounds (Section~3.1). They
+are added when a deployment needs them --- for example, the NOPP-Aleutians Signature1000 uses
+the buoyant-ascent motion model and trims deployment/recovery transit by time:
+
+\begin{lstlisting}[style=cfg]
+  "velocity": { "boxsize_m": 1.0, "motion_correct": true, "motion": "v2", "attitude": "auto" },
+  "cast":     { "min_span_dbar": 40.0, "corr_min": 50, "chunk": 500000,
+                "start_time": "2024-04-16T00:30:00", "end_time": "2024-10-28T22:30:00" }
+\end{lstlisting}
+
+\begin{thebibliography}{9}
+\bibitem{lueck1990} Lueck, R.~G. and Picklo, J.~J. (1990). Thermal inertia of conductivity
+cells: Observations with a Sea-Bird cell. \emph{J. Atmos. Oceanic Technol.}, 7, 756--768.
+\bibitem{northcott2026} Northcott, D. et al. (2026). Wirewalker Signature1000 turbulence
+dataset. Dryad, \href{https://doi.org/10.5061/dryad.8sf7m0d44}{doi:10.5061/dryad.8sf7m0d44}
+(includes \code{ProcessSingleProfile.m}).
+\bibitem{teos10} McDougall, T.~J. and Barker, P.~M. (2011). \emph{Getting started with TEOS-10
+and the Gibbs Seawater (GSW) Oceanographic Toolbox.}
+\bibitem{wiles2006} Wiles, P.~J. et al. (2006). A novel technique for measuring the rate of
+turbulent dissipation in the marine environment. \emph{Geophys. Res. Lett.}, 33, L21608.
+\end{thebibliography}
+
+\end{document}
