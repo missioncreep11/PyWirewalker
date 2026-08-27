@@ -25,6 +25,10 @@ __pycache__/
 
 # Notebooks — analysis / deployment-specific, kept local, not distributed
 *.ipynb
+notebooks/
+
+# Formal writeup — kept local; the README is the distributed doc
+docs/
 
 # Deployment config files — kept local; copy from the tracked config_*.example.json
 config_*.json

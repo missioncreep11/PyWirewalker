@@ -1,13 +1,11 @@
 # PyWirewalker
 
-Processing pipelines for the instruments carried on a wave-powered
-[Wirewalker](https://www.delmarocean.com/) profiling mooring: an **RBR Concerto CTD** and a
-**Nortek Signature1000 five-beam ADCP**. Raw instrument files are converted through a staged
+Processing pipelines for the RBR family loggers and Nortek family Doppler Sonars carried onboard the
+[Wirewalker](https://www.delmarocean.com/) profiler. Raw instrument files are converted through a staged
 L0–L3 archive of self-describing NetCDF products; every derived quantity is reproducible from
-the raw data and a single version-controlled configuration file.
+the raw data and version-controlled configuration files.
 
-This README summarizes the methods and usage. A formal, citable version with full derivations
-is in [`docs/processing_report.tex`](docs/processing_report.tex).
+This README summarizes the methods and usage. 
 
 ---
 
@@ -50,9 +48,9 @@ it. Raw instrument files are never modified.
 | **L2** | Gridded per-cast product, dims `(depth, cast)` | QC applied, derived variables, one profile per column |
 | **L3** | Regular `(depth, time)` grid | Uniform time base for spectral/temporal analysis |
 
-Two design principles are common to both instruments:
+Two design principles are common to both processing pipelines:
 
-1. **Strict downward dependence.** `L(n)` reads only `L(n−1)` — never the raw file — so a level
+1. **Strict tiered dependence.** `L(n)` reads only `L(n−1)` — never the raw file — so a level
    inherits only the variables present beneath it. Provenance is explicit and reprocessing from
    source is never silent.
 2. **Configuration, not code, carries deployment specifics.** All deployment- and
