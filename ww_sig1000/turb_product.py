@@ -3,9 +3,10 @@
 `build_turbulence_streaming` streams a raw `.ad2cp` too large to hold in memory,
 detecting upcasts on a rolling buffer and running `turbulence.process_cast_turbulence`
 (the ProcessSingleProfile.m spectral method) on each. Unlike the velocity L2 it keeps
-the HR beam-5 fields (vel_b5/corr_b5 on time_b5/range_b5, 1:1 aligned to the burst
-pings) and drops the 4-beam data. Output mirrors NortekTurbulenceData.nc: dims
-(depth, cast) with epsilon, N (noise floor), SNR, A, corr and num_spectra.
+the HR beam-5 fields (vel_b5/corr_b5/amp_b5 on time_b5/range_b5, 1:1 aligned to the
+burst pings) and drops the 4-beam data. Output mirrors NortekTurbulenceData.nc: dims
+(depth, cast) with epsilon, N (noise floor), SNR, A, corr, num_spectra and amp_b5
+(beam-5 backscatter averaged over the cells that enter each dissipation bin).
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from .casts import detect_casts
 from .l2 import _count_ensembles, _atomic_to_netcdf
 from .turbulence import process_cast_turbulence, hr_bins
 
-_VARS = ("eps", "N", "SNR", "A", "corr", "num", "eps_sf", "N_sf", "A_sf")
+_VARS = ("eps", "N", "SNR", "A", "corr", "num", "amp", "eps_sf", "N_sf", "A_sf")
 
 
 def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source):
@@ -50,6 +51,12 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
                {"long_name": "inertial-subrange amplitude (Ck eps^2/3)"}),
          "corr": (("depth", "cast"), G["corr"],
                   {"units": "percent", "long_name": "beam-5 correlation, bin mean"}),
+         "amp_b5": (("depth", "cast"), G["amp"],
+                    {"units": "count", "long_name": "beam-5 HR acoustic amplitude, "
+                     "turbulence-bin mean",
+                     "comment": "mean over the same beam-5 pings x cells that enter each "
+                                "dep_res depth bin's dissipation estimate; dolfyn-native "
+                                "amplitude scale (Nortek counts)"}),
          "num_spectra": (("depth", "cast"), G["num"].astype(np.float32),
                          {"long_name": "spectra averaged per bin"}),
          "epsilon_sf": (("depth", "cast"), G["eps_sf"],
@@ -113,7 +120,8 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None, ens_sta
         cur = {"press": ds["pressure"].values, "pitch": ds["pitch"].values,
                "roll": ds["roll"].values,
                "t": ds["time"].values.astype("datetime64[ns]"),
-               "vel": ds["vel_b5"].values, "corr": ds["corr_b5"].values}   # (cells, pings)
+               "vel": ds["vel_b5"].values, "corr": ds["corr_b5"].values,
+               "amp": ds["amp_b5"].values}   # (cells, pings)
         if buf is None:
             buf = cur
         else:
@@ -135,7 +143,7 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None, ens_sta
                     buf["vel"][:, sl].T, buf["corr"][:, sl].T, press[sl],
                     buf["pitch"][sl], buf["roll"][sl], geom["va"],
                     cellsize=geom["cs"], blockdis=geom["bd"], dep_res=dep_res,
-                    max_dep=max_dep, corr_min=corr_min,
+                    max_dep=max_dep, corr_min=corr_min, amp=buf["amp"][:, sl].T,
                     time=buf["t"][sl][(c.stop - c.start) // 2])
                 if r is not None:
                     r["complete"] = 0 if c.truncated else 1
