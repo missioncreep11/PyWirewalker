@@ -159,15 +159,28 @@ deployment/recovery transit. Instrument geometry is read from the file, never co
 Currents are formed by the standard beam → XYZ → ENU transformation of the four slant beams,
 after a correlation mask (`corr_min`), depth-alignment of the tilt-corrected per-beam cells, and
 box-averaging onto a depth grid (`boxsize_m`, `z_max_m`; 1 m default). Casts are selected by
-direction and pressure span (`kind`, `min_span_dbar`). Two motion-correction models are provided
-(`motion`, `motion_correct`, `attitude`):
+direction and pressure span (`kind`, `min_span_dbar`). Three motion-correction models are provided
+(`motion`, `motion_correct`, `attitude`, `sail`):
 
 - **v1** — a port of `WWcorr_beam`: bandpass-integrated IMU acceleration plus the `dp/dt` ascent,
-  rotated by the AHRS attitude.
-- **v2** — a buoyant-ascent model (`dp/dt` vertical, depth-gated horizontal motion, low-passed
-  accelerometer tilt), immune to AHRS attitude faults, applying a **sail correction** (ported from
-  the reference code) for along-wire travel on an inclined mooring. The attitude source is
-  selectable (`ahrs` / `reconstructed` / `auto`, which reconstructs only on AHRS-faulted casts).
+  rotated by the AHRS attitude. *(legacy)*
+- **v2** — a buoyant-ascent model (`dp/dt` vertical, depth-gain-weighted horizontal motion,
+  low-passed accelerometer tilt + tilt-compensated magnetometer heading), immune to AHRS attitude
+  faults, with the **sail correction** always on. *(legacy — frozen for reproducibility)*
+- **v3** *(recommended)* — the same buoyant-ascent engine with two independent, per-deployment
+  flags: the **attitude source** (`attitude`: `ahrs` = the instrument's AHRS solution;
+  `reconstructed` = low-passed accelerometer tilt + magnetometer heading) and the **sail
+  correction** (`sail`: on/off). Spike handling (interpolate + exclude), the `dp/dt` vertical, and
+  the depth-gain-weighted horizontal are as in v2.
+
+**When to turn the sail correction off.** The sail term removes the horizontal velocity the vehicle
+gains travelling *along an inclined wire*; its magnitude scales with `sin(tilt)` and its direction
+follows the vehicle heading. That is correct when the **whole mooring leans** (drawn over by
+current), but wrong when the ADCP carries a large **fixed mounting tilt** — there the vehicle still
+ascends vertically, so the sail term fabricates a spurious per-cast horizontal velocity that spins
+with the (rotating) vehicle heading and stripes the section. The **TLC** deployment, whose ADCP is
+bolted at a fixed **25° tilt**, is processed with `sail: false` for exactly this reason; a
+near-vertical instrument on a wire that leans under current keeps it on.
 
 **Motion-immune shear (ported).** The L2 product also carries a beam-differenced vertical shear
 (`shearE`, `shearN`), ported from the toolbox's `beamshear`. Centred cell differences
@@ -290,7 +303,7 @@ selections are optional and default when absent.
   "instrument": "Nortek Signature1000 SN000000",
   "latitude": null,
   "longitude": null,
-  "velocity":   { "boxsize_m": 1.0, "z_max_m": null, "motion_correct": true, "motion": "v1", "attitude": "ahrs" },
+  "velocity":   { "boxsize_m": 1.0, "z_max_m": null, "motion_correct": true, "motion": "v3", "attitude": "reconstructed", "sail": true },
   "turbulence": { "dep_res_m": 3.0, "max_dep_m": 100.0 },
   "cast":       { "kind": null, "min_span_dbar": 40.0, "corr_min": 50, "chunk": 500000 }
 }
@@ -305,7 +318,7 @@ selections are optional and default when absent.
 | Ingest | `.mat` export + `sort_file`/`merge_signature` | Direct `.ad2cp` read via DOLfYN; bounded-memory streaming |
 | Turbulence (spectral) | `WWturb_upward.m` (+0.28 dex bias) | `ProcessSingleProfile.m` method; validated to −0.00 dex / corr 0.994 |
 | Turbulence (2nd estimator) | Present but unused | Structure-function ε in every product; gap-robust in low scattering |
-| Motion correction | Single AHRS-based model | Selectable v1/v2 models with `auto` attitude reconstruction, robust to AHRS faults |
+| Motion correction | Single AHRS-based model | Selectable v1/v2/v3 models; v3 has independent attitude-source (`ahrs`/`reconstructed`) and `sail` flags, robust to AHRS faults |
 | Quality control | — | ε–noise-floor coupling; transfer-function shear noise floor; rotary spectra |
 | Reproducibility | Script constants | Config-driven, unit-tested, provenance in attributes, atomic writes |
 

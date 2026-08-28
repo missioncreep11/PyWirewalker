@@ -19,10 +19,12 @@ def test_dataclass_defaults():
 
 
 def test_repo_template_config_parses():
-    # the tracked config_adcp.json at the repo root should always load cleanly.
-    # Name it explicitly: a bare load_adcp_config() resolves against the working
-    # directory, so this would otherwise test whichever deployment pytest ran from.
-    template = Path(ww_sig1000.__file__).resolve().parent.parent / "config_adcp.json"
+    # the tracked config_adcp.example.json template should always load cleanly.
+    # (Real per-deployment config_adcp.json files live with their data and are
+    # gitignored; only the example is tracked.) Name it explicitly: a bare
+    # load_adcp_config() resolves against the working directory, so this would
+    # otherwise test whichever deployment pytest ran from.
+    template = Path(ww_sig1000.__file__).resolve().parent.parent / "config_adcp.example.json"
     cfg = load_adcp_config(template)
     assert isinstance(cfg, AdcpConfig)
     assert cfg.config_path == template

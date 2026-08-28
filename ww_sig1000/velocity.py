@@ -118,7 +118,8 @@ def _nominal_depth_grid(pressure, n_cells, cell_size, blank_dist, direction):
 
 def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
                  min_bin_samples=10, cell_size=None, blank_dist=None, beam_angle=None,
-                 motion_correct=True, motion="v1", bin_average="boxcar"):
+                 motion_correct=True, motion="v1", bin_average="boxcar", sail=True,
+                 attitude="ahrs"):
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
     Returns dict with keys velE, velN, velU, amp, shearE, shearN, n_obs and
@@ -164,16 +165,22 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     v2 = None
     tilt_source = None
     heading_source = None
-    if motion == "v2" and "accel" in dsc:
+    if motion in ("v2", "v3") and "accel" in dsc:
         ts_v2 = dsc["time"].values.astype("datetime64[ns]").astype("int64") / 1e9
+        if motion == "v2":                       # frozen legacy: LP-accel + mag, sail on
+            _asrc, _sail = "lp_accel", True
+        else:                                    # v3: user-selectable attitude + sail
+            _asrc, _sail = ("ahrs" if attitude == "ahrs" else "lp_accel"), sail
         v2 = beam_motion_correction_v2(ts_v2, press, dsc["accel"].values, head,
                                        float(a["fs"]),
-                                       mag=dsc["mag"].values if "mag" in dsc else None,
-                                       beam_angle=ba)
+                                       mag=None if _asrc == "ahrs" else
+                                       (dsc["mag"].values if "mag" in dsc else None),
+                                       beam_angle=ba, sail=_sail, attitude_source=_asrc,
+                                       pitch_ahrs=pitch, roll_ahrs=roll)
         if v2.usable:
             pitch, roll = v2.pitch_deg, v2.roll_deg
             head = v2.heading_deg          # Stage-2 compass when the field is sane
-            tilt_source = "lp_accel"
+            tilt_source = _asrc            # "ahrs" or "lp_accel"
             heading_source = v2.heading_source
         else:
             v2 = None

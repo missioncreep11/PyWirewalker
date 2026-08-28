@@ -182,8 +182,15 @@ def test_l2_records_motion_version_and_tilt_source():
     assert int(l2["heading_source"].values[0]) == 0
     assert l2.attrs["n_casts_heading_mag"] == 0
 
+    # v3 is now a valid model (user-selectable AHRS/LP attitude + sail toggle)
+    l3 = build_l2(_cast_ds(ahrs_pitch=10.0), cast_kind="up", min_span_dbar=40.0,
+                  motion="v3", attitude="ahrs", sail=False)
+    assert l3.attrs["motion_version"] == "v3"
+    assert "AHRS" in l3.attrs["motion_correction"] and "sail OFF" in l3.attrs["motion_correction"]
+    assert int(l3["attitude_source"].values[0]) == 0        # AHRS tilt source
+
     with pytest.raises(ValueError, match="motion"):
-        build_l2(_cast_ds(), motion="v3")
+        build_l2(_cast_ds(), motion="v9")
 
 
 # --------------------------------------------------------------------------- #

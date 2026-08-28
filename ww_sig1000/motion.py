@@ -19,7 +19,7 @@ variance accounting):
   in-band tilt noise - and fails outright on 15.7% of casts. Using the accel tilt
   makes the correction immune to AHRS faults by construction: on the 2024-05-02
   fault cast it cut wave-band velE rms from 0.13-0.14 to 0.036-0.040 m/s.
-- **Horizontal IMU correction gated by depth.** Wire-transmitted lateral shaking
+- **Horizontal IMU correction weighted by a depth gain.** Wire-transmitted lateral shaking
   is real near the surface (in-band accel 0.22 m/s2 at 0-50 m) and gone by 150 m
   (flat 0.01 m/s2 sensor floor below), so the bandpass-integrated horizontal
   term tapers to zero across `H_GAIN_FULL_M`..`H_GAIN_ZERO_M`.
@@ -38,7 +38,7 @@ from .geometry import BEAM_PHI_DEG, BEAM_AZI_DEG
 
 G = 9.81  # m s-2
 
-# v2 horizontal-correction depth gate (dbar ~ m), from the measured decay of
+# v2 horizontal-correction depth gain (dbar ~ m), from the measured decay of
 # wire-transmitted wave-band acceleration on NOPP_d2.
 H_GAIN_FULL_M = 100.0    # full weight above this depth
 H_GAIN_ZERO_M = 180.0    # zero weight below this depth
@@ -134,7 +134,7 @@ class MotionV2:
     heading_deg: np.ndarray     # heading used for every rotation (mag when usable)
     heading_source: str         # "mag" | "ahrs"
     ping_ok: np.ndarray         # (n,) False where |a| was a spike (interpolated over)
-    h_gain: np.ndarray          # (n,) depth gate applied to the horizontal term
+    h_gain: np.ndarray          # (n,) depth gain applied to the horizontal term
     usable: bool                # tilt guard + gravity check passed
 
 
@@ -148,6 +148,7 @@ def _depth_gain(pressure, full_m=H_GAIN_FULL_M, zero_m=H_GAIN_ZERO_M):
 
 def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *, mag=None,
                               beam_angle=25.0, tilt_cutoff_hz=None, sail=True,
+                              attitude_source="lp_accel", pitch_ahrs=None, roll_ahrs=None,
                               z_unit=(0.0, 0.0, 1.0),
                               h_full_m=H_GAIN_FULL_M, h_zero_m=H_GAIN_ZERO_M) -> MotionV2:
     """Per-ping platform-velocity correction for the buoyant-ascent upcast.
@@ -186,22 +187,29 @@ def beam_motion_correction_v2(time_s, pressure, accel_xyz, heading, fs, *, mag=N
         for i in range(3):
             acc[i, spike] = np.interp(idx[spike], idx[ping_ok], acc[i, ping_ok])
 
-    # tilt from the low-passed gravity direction; guard as in attitude.reconstruct
-    u = gravity_direction(acc, fs, cutoff)
-    pitch, roll = pitch_roll_from_up(u)
-    usable = bool(lowpass_smear_deg(acc, fs, cutoff, u_lp=u) < LOWPASS_SMEAR_MAX_DEG
-                  and abs(np.median(amag[ping_ok]) - G) < ACCEL_TOL) if ping_ok.any() else False
-
-    # heading from the tilt-compensated compass (Stage 2), if the field is sane
     heading = np.asarray(heading, float)
-    heading_source = "ahrs"
-    if mag is not None:
-        h_mag, mt = mag_heading(mag, pitch, roll)
-        if mag_field_ok(mag, mt):
-            heading = h_mag
-            heading_source = "mag"
+    if attitude_source == "ahrs":
+        # trust the instrument's AHRS attitude as-is (handles an arbitrary fixed tilt
+        # the LP-accel/mag path is not tuned for); heading is the AHRS heading.
+        pitch = np.asarray(pitch_ahrs, float)
+        roll = np.asarray(roll_ahrs, float)
+        heading_source = "ahrs"
+        usable = True
+    else:
+        # tilt from the low-passed gravity direction; guard as in attitude.reconstruct
+        u = gravity_direction(acc, fs, cutoff)
+        pitch, roll = pitch_roll_from_up(u)
+        usable = bool(lowpass_smear_deg(acc, fs, cutoff, u_lp=u) < LOWPASS_SMEAR_MAX_DEG
+                      and abs(np.median(amag[ping_ok]) - G) < ACCEL_TOL) if ping_ok.any() else False
+        # heading from the tilt-compensated compass (Stage 2), if the field is sane
+        heading_source = "ahrs"
+        if mag is not None:
+            h_mag, mt = mag_heading(mag, pitch, roll)
+            if mag_field_ok(mag, mt):
+                heading = h_mag
+                heading_source = "mag"
 
-    # horizontal: bandpass-integrated earth-frame acceleration, depth-gated.
+    # horizontal: bandpass-integrated earth-frame acceleration, depth-gain weighted.
     # (no IMU vertical term at all - on the upcast dp/dt is the vertical motion)
     aENU = xyz2enu(acc[:, None, :], heading, pitch, roll)[:, 0, :]
     acu = _bandpass_reflect(aENU[0], fs)

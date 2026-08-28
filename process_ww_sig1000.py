@@ -162,7 +162,7 @@ def main():
             z_max=cfg.z_max_m, cast_kind=cast_kind, min_span_dbar=cfg.min_span_dbar,
             corr_min=cfg.corr_min, ens_start=ens_start, total=ens_stop,
             motion_correct=cfg.motion_correct, attitude=cfg.attitude, motion=cfg.motion,
-            bin_average=cfg.bin_average,
+            sail=cfg.sail, bin_average=cfg.bin_average,
             mooring=cfg.mooring, source=cfg.ad2cp_path.name, progress=True)
         _stamp_provenance(DS, cfg)
         save_l2(DS, str(out))

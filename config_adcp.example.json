@@ -10,8 +10,9 @@
     "boxsize_m": 1.0,
     "z_max_m": null,
     "motion_correct": true,
-    "motion": "v1",
-    "attitude": "ahrs"
+    "motion": "v3",
+    "attitude": "reconstructed",
+    "sail": true
   },
   "turbulence": {
     "dep_res_m": 3.0,

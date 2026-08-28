@@ -21,7 +21,7 @@ from .platform import AHRS_BAD_DEG, ahrs_error
 from .velocity import NOTCH_MAX_DEPTH_M, process_cast, output_grid
 
 ATTITUDE_MODES = ("ahrs", "reconstructed", "auto")
-MOTION_VERSIONS = ("v1", "v2")
+MOTION_VERSIONS = ("v1", "v2", "v3")
 BIN_AVERAGE_MODES = ("boxcar", "notch")
 _TILT_SOURCE_FLAG = {"ahrs": 0, "lp_accel": 1, "ahrs_fallback": 2}
 _HEADING_SOURCE_FLAG = {"ahrs": 0, "mag": 1}
@@ -52,9 +52,22 @@ def _cast_attitude(dsc, mode):
                       roll=("time", rec.roll_deg)), 1, err
 
 
+def _motion_desc(motion, attitude, sail):
+    """Human-readable motion_correction provenance. v1/v2 are frozen legacy models;
+    v3 records the user-selected attitude source and sail state."""
+    if motion == "v1":
+        return "v1 (legacy): WWcorr_beam (bandpass-integrated IMU + dp/dt), AHRS attitude"
+    if motion == "v2":
+        return ("v2 (legacy): buoyant-ascent; LP-accel tilt + tilt-compensated mag heading; "
+                "sail ON; depth-gain-weighted bandpass IMU horizontal; dp/dt vertical; spike-interp")
+    att = "AHRS" if attitude == "ahrs" else "LP-accel tilt + tilt-compensated mag heading"
+    return (f"v3: buoyant-ascent; {att}; sail {'ON' if sail else 'OFF'}; "
+            "depth-gain-weighted bandpass IMU horizontal; dp/dt vertical; spike-interp")
+
+
 def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_samples,
               motion_correct, mooring, source, attitude="ahrs", motion="v1",
-              bin_average="boxcar"):
+              bin_average="boxcar", sail=True):
     """Stack a list of (cast_result, Cast, att_src, ahrs_err) into an L2 xarray.Dataset."""
     zc = output_grid(boxsize, z_max)
     nz, ncast = zc.size, len(results)
@@ -189,10 +202,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
                "motion_version": motion,
                "motion_correction": (
                    "none" if not motion_correct
-                   else "v2: along-wire dp/dt (vertical + sail) + depth-gated "
-                        "bandpass IMU horizontal, LP-accel tilt + tilt-compensated "
-                        "mag heading, spike pings excluded" if motion == "v2"
-                   else "WWcorr_beam (bandpass-integrated IMU + dp/dt)"),
+                   else _motion_desc(motion, attitude, sail)),
                "processing": "ww_sig1000 port of WW_Velocity_Processing_SWOT",
                "date_created": _time.strftime("%Y-%m-%dT%H:%M:%S")},
     )
@@ -205,7 +215,8 @@ def _select_casts(press, t_s, fs, kinds, thhold_s, min_span_dbar):
 
 def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.0,
              corr_min=50, min_bin_samples=10, thhold_s=30.0, motion_correct=True,
-             attitude="ahrs", motion="v1", bin_average="boxcar", mooring="", source=""):
+             attitude="ahrs", motion="v1", bin_average="boxcar", sail=True,
+             mooring="", source=""):
     """Grid substantial casts of an in-memory Dataset into an L2 Dataset."""
     if attitude not in ATTITUDE_MODES:
         raise ValueError(f"attitude must be one of {ATTITUDE_MODES}, got {attitude!r}")
@@ -231,12 +242,12 @@ def build_l2(ds, *, boxsize=1.0, z_max=None, cast_kind="both", min_span_dbar=40.
         g = process_cast(dsc, corr_min=corr_min, boxsize=boxsize, z_max=z_max,
                          direction=look, min_bin_samples=min_bin_samples,
                          motion_correct=motion_correct, motion=motion,
-                         bin_average=bin_average)
+                         bin_average=bin_average, sail=sail, attitude=attitude)
         results.append((g, c, src, err))
     return _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                      corr_min=corr_min, min_bin_samples=min_bin_samples,
                      motion_correct=motion_correct, mooring=mooring, source=source,
-                     attitude=attitude, motion=motion, bin_average=bin_average)
+                     attitude=attitude, motion=motion, bin_average=bin_average, sail=sail)
 
 
 def _count_ensembles(fn, reader):
@@ -275,7 +286,7 @@ def _count_ensembles(fn, reader):
 def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, boxsize=1.0,
                        z_max=None, cast_kind="both", min_span_dbar=40.0, corr_min=50,
                        min_bin_samples=10, thhold_s=30.0, gap_s=30.0, motion_correct=True,
-                       attitude="ahrs", motion="v1", bin_average="boxcar",
+                       attitude="ahrs", motion="v1", bin_average="boxcar", sail=True,
                        mooring="", source="", progress=True):
     """Grid a raw `.ad2cp` too large for memory. `reader` is dolfyn.read.
 
@@ -340,7 +351,7 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
                                  boxsize=boxsize, z_max=z_max, direction=look,
                                  min_bin_samples=min_bin_samples,
                                  motion_correct=motion_correct, motion=motion,
-                                 bin_average=bin_average)
+                                 bin_average=bin_average, sail=sail, attitude=attitude)
                 results.append((g, c, src, err))
         # carry the tail (from the start of the held-back cast) into the next chunk,
         # remembering whether a real gap clipped its start (unknowable next chunk)
@@ -367,7 +378,7 @@ def build_l2_streaming(fn, reader, *, chunk=500_000, total=None, ens_start=0, bo
     ds = _assemble(results, boxsize=boxsize, z_max=z_max, look=look, cast_kind=cast_kind,
                    corr_min=corr_min, min_bin_samples=min_bin_samples,
                    motion_correct=motion_correct, mooring=mooring, source=source,
-                   attitude=attitude, motion=motion, bin_average=bin_average)
+                   attitude=attitude, motion=motion, bin_average=bin_average, sail=sail)
     ds.attrs["ensemble_range"] = f"{int(ens_start)}:{int(total)}"
     return ds
 
