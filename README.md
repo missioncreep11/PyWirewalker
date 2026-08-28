@@ -5,34 +5,58 @@ Processing pipelines for the RBR family loggers and Nortek family Doppler Sonars
 L0–L3 archive of self-describing NetCDF products; every derived quantity is reproducible from
 the raw data and version-controlled configuration files.
 
-This README summarizes the methods and usage. 
+This README summarizes the methods and usage.
 
 ---
 
 ## Quick start
 
+**Coming from the MATLAB Wirewalker toolbox?** The workflow maps over one-to-one. The constants you
+used to edit at the top of a processing script now live in one JSON **config** per instrument, and
+each instrument has a single **driver** you run. You point the driver straight at the raw `.rsk`
+(CTD) or `.ad2cp` (ADCP) — there is **no `.mat` export and no `merge_signature` / `sort_file` step**;
+DOLfYN reads the binary directly. Output is self-describing **NetCDF** — dimensions, units, and full
+provenance live in the file attributes — not `.mat` with loose script constants.
+
+| In the MATLAB toolbox you… | In PyWirewalker you… |
+|---|---|
+| edit constants at the top of the `.m` script | edit a `config_*.json` (kept next to the deployment's data) |
+| export to `.mat`, then `merge_signature` / `sort_file` | nothing — the driver reads the raw `.rsk` / `.ad2cp` directly |
+| run the processing `.m` script | run `process_wirewalker_rbr.py` (CTD) / `process_ww_sig1000.py` (ADCP) |
+| get `.mat` files + whatever the script printed | get NetCDF `L1`–`L3`, with the settings recorded in the attributes |
+
 ```bash
-# 1. environment (creates the `wirewalker` conda env)
+# 1. one-time: build the isolated `wirewalker` conda environment (like a self-contained toolbox path)
 conda env create -f environment.yml
 conda activate wirewalker
-python -m pytest ww_rbr/tests ww_sig1000/tests -q      # sanity check
+python -m pytest ww_rbr/tests ww_sig1000/tests -q            # sanity check
 
-# 2. configure — copy a template and edit it (real configs stay local, gitignored)
-cp config_ctd.example.json  config_ctd.json            # CTD
-cp config_adcp.example.json config_adcp.json           # ADCP
+# 2. configure — copy a template and edit it for your deployment (this is your "script header")
+cp config_ctd.example.json  config_ctd.json                  # CTD
+cp config_adcp.example.json config_adcp.json                 # ADCP
+#    edit at minimum: the raw-file path, output_dir, basename, latitude/longitude, mooring
+#    CTD  also: atmospheric_pressure_dbar, sampling_hz, grid sizes
+#    ADCP also: velocity.motion / attitude / sail   (see "Configuration" below — v3 is recommended)
 
-# 3a. CTD: raw .rsk -> L1 -> L2 -> L3
-python process_wirewalker_rbr.py --level all           # or --level 1 / 2 / 3
+# 3a. CTD:  raw .rsk   -> L1 (convert) -> L2 (gridded upcasts) -> L3 (regular depth-time grid)
+python process_wirewalker_rbr.py --level all                 # or --level 1 / 2 / 3
 
 # 3b. ADCP: raw .ad2cp -> (depth, cast) velocity and/or turbulence products
 python process_ww_sig1000.py --product velocity
 python process_ww_sig1000.py --product turbulence
+
+# 4. peek at a product (self-describing NetCDF):
+ncdump -h  <output_dir>/L2/<basename>_L2_*.nc                 # header: dims, vars, units, provenance
+python -c "import xarray as xr; print(xr.open_dataset('<path>.nc'))"
 ```
 
-Point either driver at another deployment with `--config <file>`; any individual setting is
-overridable on the command line, and paths may use `~` or the `WW_RSK` / `WW_AD2CP` /
-`WW_OUTPUT_DIR` / `WW_CONFIG` / `WW_ADCP_CONFIG` environment variables. Data products and
-figures are **not tracked in git** (see `.gitignore`); rebuild them from the raw files.
+**One config per deployment, kept with its data.** Copy the template beside the raw file and pass it
+explicitly — `--config /path/to/<deployment>/config_adcp.json` (an absolute path avoids the
+working-directory ambiguity a bare filename would have). Any single setting is overridable on the
+command line, and paths may use `~` or the `WW_RSK` / `WW_AD2CP` / `WW_OUTPUT_DIR` / `WW_CONFIG` /
+`WW_ADCP_CONFIG` environment variables. Data products and figures are **not tracked in git** (see
+`.gitignore`); rebuild them from the raw files at any time — reprocessing is never silent, since
+every product records the exact settings that made it.
 
 ---
 
