@@ -314,57 +314,140 @@ The port adds quantitative quality measures absent from the original toolbox:
 
 ## Configuration
 
-Copy a tracked template to the working name and edit it:
+Every processing value lives in a per-deployment JSON file kept **with the data** (gitignored);
+only the `*.example.json` templates are tracked. Copy a template to the working name and edit it:
 
 ```bash
 cp config_ctd.example.json  config_ctd.json
 cp config_adcp.example.json config_adcp.json
 ```
 
-The real `config_*.json` are gitignored (kept local). Every processing value is set here; the
-CTD and ADCP sections above name each key at its point of use.
+**Resolution and overrides.** The driver looks for the config via `--config`, then `$WW_CONFIG`
+(CTD) / `$WW_ADCP_CONFIG` (ADCP), then a `config_*.json` in the working directory or repo root; an
+ambiguous (relative) path must be confirmed. Paths can be overridden without editing the file:
+`$WW_RSK` / `$WW_AD2CP` (raw input) and `$WW_OUTPUT_DIR` (output). For the ADCP, **any CLI flag
+overrides the corresponding config value** (`--boxsize`, `--motion`, `--attitude`, `--start-time`,
+…). Product filenames encode the grid parameters (e.g. `_L2_grid0.5m`, `_L3_grid1m_15min`), so
+changing a grid size writes a new file rather than overwriting the old one, and the resolved
+settings are stamped into every product's NetCDF attributes.
 
-**CTD** (`config_ctd.example.json`):
+Required keys have no default (the run errors without them); everything else defaults as shown. The
+detailed behaviour behind the processing choices is in the CTD and ADCP sections above — the tables
+here are the exhaustive key reference.
+
+### CTD options (`config_ctd.json`)
+
+| Block | Key | Default | Description |
+|-------|-----|---------|-------------|
+| *(top)* | `rsk_file` | *(required)* | Raw RBR `.rsk` (SQLite). `$WW_RSK` overrides. |
+| *(top)* | `output_dir` | *(required)* | Directory for the `L1/ L2/ L3/` products. `$WW_OUTPUT_DIR` overrides. |
+| *(top)* | `basename` | *(required)* | Prefix for every product filename. |
+| *(top)* | `mooring` | `""` | Deployment name (written to product attributes). |
+| *(top)* | `instrument` | `""` | Instrument description (attributes). |
+| *(top)* | `latitude` | *(required)* | Deployment latitude — TEOS-10/`gsw` needs it for depth and absolute salinity. |
+| *(top)* | `longitude` | *(required)* | Deployment longitude (as above). |
+| *(top)* | `atmospheric_pressure_dbar` | `10.1325` | Subtracted from total pressure to get sea pressure. |
+| *(top)* | `sampling_hz` | *(derived)* | Sampling rate (Hz). Optional — omitted, it is read from the record (median sample interval); set only to override. |
+| *(top)* | `n2_vertical_smoothing_m` | `5.0` | Boxcar length (m) applied to σ₀ before differencing for N². |
+| *(top)* | `gravity` | `9.81` | g used in N² = (g/ρ₀) ∂σ₀/∂z. |
+| `thermal_mass` | `alpha` | `0.04` | Lueck & Picklo cell-thermal-mass amplitude. |
+| `thermal_mass` | `beta_per_s` | `0.1` | Lueck & Picklo inverse time constant (s⁻¹). |
+| `thermal_mass` | `gamma` | `1.0` | Overall correction scale (1.0 = full). |
+| `grid` | `l2_dz_m` | `0.5` | L2 depth-bin size (m). |
+| `grid` | `zmin_m` | `0.0` | L2 grid top (m). |
+| `grid` | `zmax_m` | `500.0` | L2 grid bottom (m); set to the deployment's max depth. |
+| `grid` | `l3_dz_m` | `1.0` | L3 depth-bin size (m); a multiple of `l2_dz_m`. |
+| `grid` | `l3_dt` | `"30min"` | L3 time-bin width — any pandas offset (`"10min"`, `"1h"`, …). |
+| `grid` | `l3_interp_max_gap_bins` | `1` | Gap-fill whole-empty L3 time bins across runs up to this many bins. |
+| `cast_detection` | `method` | `"pressure"` | `"pressure"` = detect casts from CTD pressure (port of `get_upcastRBR`); `"ruskin"` = reuse the `.rsk` region tables. |
+| `cast_detection` | `slope_window_s` | `5.0` | Window (s) for the centred pressure slope that classifies rising vs sinking. |
+| `cast_detection` | `debounce_window_s` | `7.5` | Majority-vote window (s) removing brief flips at the apex/nadir turnarounds. |
+| `cast_detection` | `min_slope_dbar_per_s` | `0.04` | Profiling-speed threshold (dbar s⁻¹) separating a cast from a dwell. |
+| `cast_detection` | `min_span_dbar` | `5.0` | Discard detected runs spanning less than this (surface dwell, telemetry stops). |
+| `cast_detection` | `gap_factor` | `4.0` | Split the record at any interval > this × the median (a data drop) and detect within each continuous segment. |
+
+*Notes.* Only **upcasts** reach L2/L3. The sampling rate and time continuity are read from the
+record, so `sampling_hz` is optional and a telemetered file with drops is handled automatically
+(see *Cast detection*). `l3_dt` should be chosen relative to the cast cadence — wide enough that
+most time bins catch a cast, but the wider it is the more a long cast's time slant matters (each
+depth is binned by its own sample time). `zmax_m` only sets the grid extent; deeper-than-profiled
+bins are simply never populated.
+
+### ADCP options (`config_adcp.json`)
+
+Instrument geometry (cell size, blanking, ambiguity velocity, sample rate) is **read from the
+`.ad2cp`**, never configured.
+
+| Block | Key | Default | Description |
+|-------|-----|---------|-------------|
+| *(top)* | `ad2cp_file` | *(required)* | Raw Nortek `.ad2cp`. `$WW_AD2CP` overrides. |
+| *(top)* | `output_dir` | *(required)* | Directory for the products. `$WW_OUTPUT_DIR` overrides. |
+| *(top)* | `basename` | `"adcp"` | Prefix for product filenames. |
+| *(top)* | `mooring` | `""` | Deployment name (attributes). |
+| *(top)* | `instrument` | `""` | Instrument description (attributes). |
+| *(top)* | `latitude` | `null` | Metadata only (ENU comes from the heading, not position). |
+| *(top)* | `longitude` | `null` | Metadata only. |
+| `velocity` | `boxsize_m` | `1.0` | L2 depth-bin size (m). |
+| `velocity` | `z_max_m` | `null` | L2 grid max depth (m); `null` → auto from max pressure. Set to the profiling depth to drop always-empty deep bins. |
+| `velocity` | `motion_correct` | `true` | Apply IMU platform-motion correction; `false` leaves raw beam→ENU velocities. |
+| `velocity` | `motion` | `"v1"` | Motion model: `v1`/`v2` (frozen legacy) or `v3` (flexible). See *Velocity and shear*. |
+| `velocity` | `attitude` | `"ahrs"` | Pitch/roll source (v3): `ahrs`, `reconstructed` (accel-derived), or `auto` (reconstruct only on AHRS-faulted casts). |
+| `velocity` | `sail` | `true` | v3 along-wire "sail" correction. Turn **off** for a large fixed mount tilt (see *When to turn the sail correction off*). |
+| `velocity` | `bin_average` | `"boxcar"` | Depth-bin estimator: `boxcar` mean, or `notch` (ridged constant + wave-band fit above 60 m, suppressing residual surface-wave contamination). |
+| `velocity` | `l3_dz_m` | *(= boxsize)* | L3 depth-bin size (m); omit/`null` → `boxsize_m`. |
+| `velocity` | `l3_dt` | `"15min"` | L3 time-bin width (pandas offset). |
+| `velocity` | `l3_interp_max_gap_bins` | `1` | L3 whole-empty-bin gap-fill run length. |
+| `turbulence` | `dep_res_m` | `3.0` | Dissipation depth-bin resolution (m). |
+| `turbulence` | `max_dep_m` | `100.0` | Deepest ε bin (m). |
+| `cast` | `kind` | `null` | `up`/`down`/`both`; `null` → per-product default (velocity `both`, turbulence `up`). |
+| `cast` | `min_span_dbar` | `40.0` | Discard casts whose pressure span is under this. |
+| `cast` | `corr_min` | `50` | Beam-correlation threshold (%); cells below it are masked before averaging. |
+| `cast` | `chunk` | `500000` | Ensembles per streaming read (memory vs. speed). |
+| `cast` | `start_ensemble` | `0` | First ensemble to process (trims deployment transit). |
+| `cast` | `end_ensemble` | `null` | Stop before this ensemble; `null` → end of record. |
+| `cast` | `start_time` | `null` | ISO time; first ensemble at/after it. **Overrides** `start_ensemble`. |
+| `cast` | `end_time` | `null` | ISO time; stop here. **Overrides** `end_ensemble`. |
+
+*Notes.* The velocity and turbulence products share the `cast` block but default `kind`
+differently (velocity keeps both directions; turbulence uses upcasts). Only velocity has an **L3**
+(regular depth–time grid, upcasts only, gap-filled) — there is no turbulence L3. For a mount with a
+large fixed tilt (e.g. the TLC ADCP at 25°), set `motion: "v3"`, `attitude: "ahrs"`, `sail: false`;
+the sail term is correct only for a leaning wire, not a fixed tilt. `bin_average: "notch"` costs a
+little time for 7–17 % less near-surface velocity noise and is identical to `boxcar` below 60 m.
+
+### Example templates
 
 ```json
+// config_ctd.example.json
 {
   "rsk_file": "/path/to/deployment.rsk",
   "output_dir": "/path/to/output",
   "basename": "MOORING_INSTRUMENT",
   "mooring": "MOORING_NAME",
   "instrument": "RBR Concerto SN000000",
-  "latitude": 0.0,
-  "longitude": 0.0,
+  "latitude": 0.0, "longitude": 0.0,
   "atmospheric_pressure_dbar": 10.1325,
   "thermal_mass": { "alpha": 0.04, "beta_per_s": 0.1, "gamma": 1.0 },
-  "grid": {
-    "l2_dz_m": 0.5, "zmin_m": 0.0, "zmax_m": 500.0,
-    "l3_dz_m": 1.0, "l3_dt": "30min", "l3_interp_max_gap_bins": 1
-  },
-  "cast_detection": {
-    "method": "pressure",
-    "slope_window_s": 5.0, "debounce_window_s": 7.5,
-    "min_slope_dbar_per_s": 0.04, "min_span_dbar": 5.0, "gap_factor": 4.0
-  },
-  "n2_vertical_smoothing_m": 5.0,
-  "gravity": 9.81
+  "grid": { "l2_dz_m": 0.5, "zmin_m": 0.0, "zmax_m": 500.0,
+            "l3_dz_m": 1.0, "l3_dt": "30min", "l3_interp_max_gap_bins": 1 },
+  "cast_detection": { "method": "pressure", "slope_window_s": 5.0, "debounce_window_s": 7.5,
+                      "min_slope_dbar_per_s": 0.04, "min_span_dbar": 5.0, "gap_factor": 4.0 },
+  "n2_vertical_smoothing_m": 5.0, "gravity": 9.81
 }
 ```
 
-**ADCP** (`config_adcp.example.json`): instrument geometry is *not* configured — it is read from
-the `.ad2cp`. Record-trim (`cast.start_time`/`end_time`) and the velocity `motion`/`attitude`
-selections are optional and default when absent.
-
 ```json
+// config_adcp.example.json
 {
   "ad2cp_file": "/path/to/deployment.ad2cp",
   "output_dir": "/path/to/output",
   "basename": "MOORING_INSTRUMENT",
   "mooring": "MOORING_NAME",
   "instrument": "Nortek Signature1000 SN000000",
-  "latitude": null,
-  "longitude": null,
-  "velocity":   { "boxsize_m": 1.0, "z_max_m": null, "motion_correct": true, "motion": "v3", "attitude": "reconstructed", "sail": true },
+  "latitude": null, "longitude": null,
+  "velocity":   { "boxsize_m": 1.0, "z_max_m": null, "motion_correct": true,
+                  "motion": "v3", "attitude": "reconstructed", "sail": true,
+                  "l3_dz_m": 2.0, "l3_dt": "15min", "l3_interp_max_gap_bins": 1 },
   "turbulence": { "dep_res_m": 3.0, "max_dep_m": 100.0 },
   "cast":       { "kind": null, "min_span_dbar": 40.0, "corr_min": 50, "chunk": 500000 }
 }
