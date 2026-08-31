@@ -41,6 +41,14 @@ class Config:
     n2_smooth_m: float = 5.0
     gravity: float = 9.81
 
+    # --- cast detection (from CTD pressure; see rsk.detect_casts) ---
+    cast_method: str = "pressure"          # "pressure" (our detector) | "ruskin" (region tables)
+    cast_slope_window_s: float = 5.0
+    cast_debounce_window_s: float = 7.5
+    cast_min_slope_dbar_per_s: float = 0.04
+    cast_min_span_dbar: float = 5.0
+    cast_gap_factor: float = 4.0           # split the record where dt > this x median (data drops)
+
     # --- derived product paths (grid sizes encoded so names track config) ---
     @property
     def l1_path(self) -> Path:
@@ -56,11 +64,8 @@ class Config:
 
     @property
     def l3_path(self) -> Path:
+        # single, gap-filled L3 product (n_casts==0 marks interpolated bins)
         return self.output_dir / "L3" / f"{self._l3name}.nc"
-
-    @property
-    def l3i_path(self) -> Path:
-        return self.output_dir / "L3" / f"{self._l3name}_interp.nc"
 
 
 CONFIG_NAME = "config_ctd.json"
@@ -149,6 +154,7 @@ def load_config(path=None, assume_yes: bool = False) -> Config:
         cfg = json.load(f)
     gr = cfg.get("grid", {})
     tm = cfg.get("thermal_mass", {})
+    cd = cfg.get("cast_detection", {})
     return Config(
         rsk_path=Path(os.environ.get("WW_RSK", cfg["rsk_file"])).expanduser(),
         output_dir=Path(os.environ.get("WW_OUTPUT_DIR", cfg["output_dir"])).expanduser(),
@@ -169,4 +175,10 @@ def load_config(path=None, assume_yes: bool = False) -> Config:
         l3_interp_maxgap=gr.get("l3_interp_max_gap_bins", 1),
         n2_smooth_m=cfg.get("n2_vertical_smoothing_m", 5.0),
         gravity=cfg.get("gravity", 9.81),
+        cast_method=cd.get("method", "pressure"),
+        cast_slope_window_s=cd.get("slope_window_s", 5.0),
+        cast_debounce_window_s=cd.get("debounce_window_s", 7.5),
+        cast_min_slope_dbar_per_s=cd.get("min_slope_dbar_per_s", 0.04),
+        cast_min_span_dbar=cd.get("min_span_dbar", 5.0),
+        cast_gap_factor=cd.get("gap_factor", 4.0),
     )

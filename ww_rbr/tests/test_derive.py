@@ -64,4 +64,3 @@ def test_config_derived_paths():
     assert cfg.l1_path == Path("/out/L1/DEP_L1_converted.nc")
     assert cfg.l2_path == Path("/out/L2/DEP_L2_upcast_grid0.5m.nc")
     assert cfg.l3_path == Path("/out/L3/DEP_L3_grid1m_30min.nc")
-    assert cfg.l3i_path == Path("/out/L3/DEP_L3_grid1m_30min_interp.nc")

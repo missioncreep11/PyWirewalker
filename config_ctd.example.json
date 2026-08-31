@@ -21,6 +21,14 @@
     "l3_dt": "30min",
     "l3_interp_max_gap_bins": 1
   },
+  "cast_detection": {
+    "method": "pressure",
+    "slope_window_s": 5.0,
+    "debounce_window_s": 7.5,
+    "min_slope_dbar_per_s": 0.04,
+    "min_span_dbar": 5.0,
+    "gap_factor": 4.0
+  },
   "n2_vertical_smoothing_m": 5.0,
   "gravity": 9.81
 }

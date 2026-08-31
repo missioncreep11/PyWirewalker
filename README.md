@@ -84,8 +84,13 @@ Two design principles are common to both processing pipelines:
    deployment-specific value below is a configuration item, named in `code font` where it appears.
 
 The **`(depth, cast)`** L2 convention is shared by the CTD and ADCP: each column is one upcast,
-each row a depth bin, with a `time` coordinate carrying the cast mid-time. This lets CTD,
-velocity, and turbulence products be co-registered by cast and depth without interpolation.
+each row a depth bin. This lets CTD, velocity, and turbulence products be co-registered by cast and
+depth without interpolation. Because a buoyant upcast is **slanted in time** (the vehicle samples
+the deep bins minutes before the shallow ones), the CTD L2 stores `time` — and `pressure` — as full
+2-D `(depth, cast)` fields like every other variable, rather than one timestamp per profile. That
+matters when regridding to L3: each depth cell is placed into the time bin of *its own* sample time,
+so a slow/deep profile spanning several L3 time steps is spread across them instead of being
+collapsed to a single cast time (a real bias for long casts).
 
 ---
 
@@ -115,11 +120,25 @@ The CTD chain (`ww_rbr/`, driver `process_wirewalker_rbr.py`) converts a raw RBR
 `.rsk` file into an L1–L3 archive. Reference deployment: mooring **NOPP-Aleutians** (RBR
 Concerto³ S/N 213752, ~5.3 × 10⁷ scans).
 
-**Cast detection.** Profiles are not re-detected; the chain reuses the instrument-generated
-segmentation in the Ruskin `region` / `regionCast` tables. Each profile splits into a *down
-cast* (slow ratcheting descent) and an *up cast* (fast buoyant ascent). Only **upcasts** are
-gridded — the CTD sits on top of the vehicle and is in its wake during descent, so downcasts are
-contaminated; up/down agreement is never used as a metric.
+**Cast detection.** Profiles are detected from the **CTD pressure record itself**, not taken
+from the instrument file — a time-aware, vectorised port of the historical MATLAB
+`get_upcastRBR.m` (`ww_rbr.rsk.detect_casts`; set `cast_detection.method` to `"ruskin"` to fall
+back to the `region` / `regionCast` tables instead). It classifies every sample as rising or
+sinking from the sign of the local pressure slope, debounces the flag with a majority vote to
+remove brief flips at the turnarounds, then splits the flag into casts, dropping runs too small
+in pressure span to be real (surface dwell, telemetry stops). Everything is specified in physical
+units — profiling **speed** (`min_slope_dbar_per_s`) and **time** (`slope_window_s`,
+`debounce_window_s`) — and the sampling rate is read from the record (median sample interval), so
+the same config works across instruments logging at different rates. The record's **time
+continuity is checked first**: an RBR cannot skip samples onboard, but a real-time telemetered
+file can drop data, so any interval longer than `gap_factor` × the median is treated as a drop and
+detection runs independently within each continuous segment — no analysis window ever spans a gap.
+On the TLC gold-standard deployment (11.8 M scans, 8 Hz) this recovers 2116 upcasts, matching the
+Ruskin segmentation to within 3 casts (all 2116 within 0.5 s median of a Ruskin upcast).
+
+Each profile splits into a *down cast* (slow ratcheting descent) and an *up cast* (fast buoyant
+ascent). Only **upcasts** are gridded — the CTD sits on top of the vehicle and is in its wake
+during descent, so downcasts are contaminated; up/down agreement is never used as a metric.
 
 **L1 — full-resolution conversion.** `build_L1` reads the raw `.rsk` (SQLite) and writes the
 full-rate time series in physical units at whatever rate the instrument recorded (`sampling_hz`;
@@ -141,12 +160,23 @@ selects upcasts, and bin-averages onto a vertical grid (`l2_dz_m`, `zmin_m`, `zm
 TEOS-10 variables are then derived with `gsw`: sea pressure `p = p_total − atmospheric_pressure_dbar`,
 depth, practical/absolute salinity, conservative temperature, σ₀, and sound speed (latitude and
 longitude from `latitude`/`longitude`). The L2 product carries these plus the bin-averaged
-auxiliary channels and `n_obs`, dimensioned `(depth, cast)`.
+auxiliary channels and `n_obs`, all dimensioned `(depth, cast)` — including `pressure` and `time`,
+which are stored as full 2-D fields because sampling within a cast is irregular in both.
 
-**L3 — regular depth–time grid and stratification.** `build_L3` interpolates L2 onto a grid whose
-spacing is set in the config (`l3_dz_m`, `l3_dt`; 1 m × 30 min for the reference deployment). Empty
-bins are left **NaN — no temporal interpolation** in the archival product; a companion `_interp`
-product fills only isolated single-bin gaps (≤ `l3_interp_max_gap_bins`). The squared buoyancy
+**L3 — regular depth–time grid and stratification.** `build_L3` grids L2 onto a regular depth–time
+matrix whose spacing is set in the config (`l3_dz_m`, `l3_dt`; 1 m × 30 min for the reference
+deployment). Being a regular grid, `time` and `pressure` here collapse to **1-D** vectors (the
+constant-Δt axis and the ≈1-D-in-depth pressure), while the data variables are 2-D `(depth, time)`.
+Each L2 depth cell is binned by its **own** 2-D sample time (see the slant note above), so `n_casts`
+— the number of distinct upcasts contributing to a time bin — can exceed one even where cadence is
+sparse, and a long profile is spread across the bins it truly spans. L3 is the **continuous**
+product — that is its purpose — so whole-empty time bins are linearly interpolated across short gaps
+(≤ `l3_interp_max_gap_bins`); longer gaps stay NaN, and `n_casts == 0` marks an interpolated bin (so
+`where(n_casts > 0)` recovers the observed-only grid). The build reports how sparse the matrix was
+**before** interpolation and stores it on the product (`pre_interpolation_matrix_sparsity_percent`,
+`pre_interpolation_empty_time_bins_percent`, `matrix_sparsity_percent`, `time_coverage_percent`): on
+the TLC gold-standard (1 m × 15 min) the raw matrix is 13% empty (0.9% of time bins had no upcast),
+which the single-bin gap-fill takes to 12% empty / 100% time coverage. The squared buoyancy
 frequency is
 
 $$N^2 = \frac{g}{\rho_0} \frac{\partial \sigma_0}{\partial z}$$
@@ -308,6 +338,11 @@ CTD and ADCP sections above name each key at its point of use.
   "grid": {
     "l2_dz_m": 0.5, "zmin_m": 0.0, "zmax_m": 500.0,
     "l3_dz_m": 1.0, "l3_dt": "30min", "l3_interp_max_gap_bins": 1
+  },
+  "cast_detection": {
+    "method": "pressure",
+    "slope_window_s": 5.0, "debounce_window_s": 7.5,
+    "min_slope_dbar_per_s": 0.04, "min_span_dbar": 5.0, "gap_factor": 4.0
   },
   "n2_vertical_smoothing_m": 5.0,
   "gravity": 9.81

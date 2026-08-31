@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Wirewalker RBR Concerto CTD processing: raw .rsk -> L1/L2/L3 NetCDF archive.
 
-Thin CLI entry point; all logic lives in the `ww_rbr` package. The Ruskin software
-already detected profiles (region / regionCast tables), which we reuse.
+Thin CLI entry point; all logic lives in the `ww_rbr` package. Casts are detected
+from the CTD pressure record itself (ww_rbr.rsk.detect_casts; a time-aware port of
+the MATLAB get_upcastRBR), not taken from the Ruskin region tables.
 
 Levels:
     L1  full-resolution converted time series (measured channels + depth + flags)
