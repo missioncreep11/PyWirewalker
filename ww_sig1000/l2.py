@@ -75,7 +75,12 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
          for k in ("velE", "velN", "velU", "amp", "shearE", "shearN",
                    "velE_sem", "velN_sem", "velU_sem", "shearE_sem", "shearN_sem")}
     nobs = np.zeros((nz, ncast), np.int32)
-    ctime = np.empty(ncast, "datetime64[ns]")
+    # per-(depth, cast) sample time as float ms since epoch (NaN where empty). Stored
+    # with a CF units attr rather than as datetime64 so xarray writes it as a plain
+    # float column: a 2-D datetime64 coord with NaT triggers a fill-value that overflows
+    # on decode. (Mirrors the CTD L2, which stores its 2-D time the same way.)
+    gtime = np.full((nz, ncast), np.nan)
+    ctime = np.empty(ncast, "datetime64[ns]")         # per-cast mid-time (for ordering)
     cpmax = np.zeros(ncast)
     cpmin = np.zeros(ncast)
     cdir = np.zeros(ncast, np.int8)
@@ -87,7 +92,11 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
         for k in G:
             G[k][:, j] = g[k]
         nobs[:, j] = g["n_obs"]
-        ctime[j] = np.datetime64(g["time"], "ns")
+        _tt = np.asarray(g["time"]).astype("datetime64[ms]")     # (nz,) per-bin time
+        _tc = _tt.view("int64").astype(float)
+        _tc[np.isnat(_tt)] = np.nan
+        gtime[:, j] = _tc
+        ctime[j] = np.datetime64(g["cast_time"], "ns")
         cpmax[j] = g["pressure_max"]
         cpmin[j] = g["pressure_min"]
         cdir[j] = 1 if cast.direction == "up" else 0
@@ -101,6 +110,7 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
     order = np.argsort(ctime)                      # ensure time order
     for k in G:
         G[k] = G[k][:, order]
+    gtime = gtime[:, order]
     nobs, ctime, cdir = nobs[:, order], ctime[order], cdir[order]
     cpmax, cpmin, ccomplete = cpmax[order], cpmin[order], ccomplete[order]
     csrc, chead, cerr = csrc[order], chead[order], cerr[order]
@@ -141,7 +151,12 @@ def _assemble(results, *, boxsize, z_max, look, cast_kind, corr_min, min_bin_sam
          "n_obs": (("depth", "cast"), nobs, {"long_name": "samples averaged per bin"})},
         coords={"depth": ("depth", zc.astype(np.float32), {"units": "m", "positive": "down"}),
                 "cast": ("cast", np.arange(ncast, dtype=np.int32)),
-                "time": ("cast", ctime, {"long_name": "cast mid-time"}),
+                "time": (("depth", "cast"), gtime,
+                         {"units": "milliseconds since 1970-01-01 00:00:00 UTC",
+                          "standard_name": "time", "calendar": "standard",
+                          "long_name": "mean sample time in each (depth, cast) bin",
+                          "comment": "2-D because a buoyant upcast is slanted in time "
+                                     "(deep sampled before shallow)"}),
                 "pressure_max": ("cast", cpmax.astype(np.float32), {"units": "dbar"}),
                 "pressure_min": ("cast", cpmin.astype(np.float32), {"units": "dbar"}),
                 "cast_direction": ("cast", cdir,

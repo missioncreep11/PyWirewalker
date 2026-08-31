@@ -27,17 +27,26 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
     zc, _ = hr_bins(cellsize, dep_res, max_dep)
     nz, ncast = zc.size, len(results)
     G = {k: np.full((nz, ncast), np.nan, np.float32) for k in _VARS}
-    ctime = np.empty(ncast, "datetime64[ns]")
+    # per-(depth, cast) sample time as float ms since epoch (NaN where empty); stored
+    # with a CF units attr, not as datetime64, so a NaT-bearing 2-D coord does not get a
+    # fill value that overflows on decode. (Same as the velocity L2 and the CTD L2.)
+    gtime = np.full((nz, ncast), np.nan)
+    ctime = np.empty(ncast, "datetime64[ns]")         # per-cast mid-time (for ordering)
     ccomplete = np.zeros(ncast, np.int8)
     for j, r in enumerate(results):
         for k in _VARS:
             G[k][:, j] = r[k]
-        ctime[j] = r["time"]
+        _tt = np.asarray(r["time"]).astype("datetime64[ms]")
+        _tc = _tt.view("int64").astype(float)
+        _tc[np.isnat(_tt)] = np.nan
+        gtime[:, j] = _tc
+        ctime[j] = r["cast_time"]
         ccomplete[j] = r["complete"]
 
     order = np.argsort(ctime)
     for k in G:
         G[k] = G[k][:, order]
+    gtime = gtime[:, order]
     ctime, ccomplete = ctime[order], ccomplete[order]
     n_trunc = int((ccomplete == 0).sum())
 
@@ -68,7 +77,12 @@ def _assemble(results, *, cellsize, dep_res, max_dep, corr_min, mooring, source)
                   {"long_name": "structure-function amplitude (C_SF eps^2/3)"})},
         coords={"depth": ("depth", zc.astype(np.float32), {"units": "m", "positive": "down"}),
                 "cast": ("cast", np.arange(ncast, dtype=np.int32)),
-                "time": ("cast", ctime, {"long_name": "cast mid-time"}),
+                "time": (("depth", "cast"), gtime,
+                         {"units": "milliseconds since 1970-01-01 00:00:00 UTC",
+                          "standard_name": "time", "calendar": "standard",
+                          "long_name": "mean sample time in each (depth, cast) bin",
+                          "comment": "2-D because a buoyant upcast is slanted in time "
+                                     "(deep sampled before shallow)"}),
                 "profile_complete": ("cast", ccomplete,
                                      {"long_name": "profile completeness flag",
                                       "flag_values": np.array([0, 1], np.int8),
@@ -144,7 +158,7 @@ def build_turbulence_streaming(fn, reader, *, chunk=500_000, total=None, ens_sta
                     buf["pitch"][sl], buf["roll"][sl], geom["va"],
                     cellsize=geom["cs"], blockdis=geom["bd"], dep_res=dep_res,
                     max_dep=max_dep, corr_min=corr_min, amp=buf["amp"][:, sl].T,
-                    time=buf["t"][sl][(c.stop - c.start) // 2])
+                    times=buf["t"][sl])
                 if r is not None:
                     r["complete"] = 0 if c.truncated else 1
                     results.append(r)

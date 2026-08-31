@@ -123,8 +123,10 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
     """Grid one cast (a dolfyn Dataset subset in **beam** coords) to a depth profile.
 
     Returns dict with keys velE, velN, velU, amp, shearE, shearN, n_obs and
-    per-component ``*_sem`` standard errors (each (nz,)), plus scalars time
-    (datetime64), pressure_max, pressure_min, and the depth grid `z`.
+    per-component ``*_sem`` standard errors (each (nz,)), the per-bin sample
+    ``time`` (nz, datetime64; a slanted upcast so it varies with depth), plus
+    scalars ``cast_time`` (datetime64, for ordering), pressure_max, pressure_min,
+    and the depth grid `z`.
 
     ``shearE``/``shearN`` are the beam-differenced shear (WWvel_upward's
     ``beamshear``): centred cell differences along each beam before any
@@ -328,8 +330,18 @@ def process_cast(dsc, *, corr_min=50, boxsize=1.0, z_max=110.0, direction="up",
                 if c is not None:
                     out[name][j] = c
 
-    t = dsc["time"].values
-    out["time"] = t[t.size // 2]
+    # per-bin mean sample time, box-averaged on the same depth bins as the data. A
+    # buoyant upcast is slanted in time (deep sampled before shallow), so time is 2-D
+    # (per depth bin), not one mid-time per cast; assembled into (depth, cast) in l2.
+    # Work in ms so magnitudes stay within float64 precision.
+    ts_ms = dsc["time"].values.astype("datetime64[ms]").view("int64").astype(float)  # (nping,)
+    tflat = np.broadcast_to(ts_ms[None, :], depth.shape).ravel()
+    tsum = np.bincount(ib[valid], weights=tflat[valid], minlength=nz)
+    tcnt = np.bincount(ib[valid], minlength=nz).astype(float)
+    with np.errstate(invalid="ignore"):
+        btime_ms = np.where(tcnt > 0, tsum / tcnt, np.nan)
+    out["time"] = btime_ms.astype("datetime64[ms]").astype("datetime64[ns]")  # (nz,), NaT if empty
+    out["cast_time"] = dsc["time"].values[dsc.sizes["time"] // 2]             # scalar, cast ordering
     out["pressure_max"] = float(np.nanmax(press))
     out["pressure_min"] = float(np.nanmin(press))
     if tilt_source is not None:

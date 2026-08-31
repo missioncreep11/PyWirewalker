@@ -35,7 +35,7 @@ python -m pytest ww_rbr/tests ww_sig1000/tests -q            # sanity check
 cp config_ctd.example.json  config_ctd.json                  # CTD
 cp config_adcp.example.json config_adcp.json                 # ADCP
 #    edit at minimum: the raw-file path, output_dir, basename, latitude/longitude, mooring
-#    CTD  also: atmospheric_pressure_dbar, sampling_hz, grid sizes
+#    CTD  also: atmospheric_pressure_dbar, grid sizes (sampling rate is read from the .rsk)
 #    ADCP also: velocity.motion / attitude / sail   (see "Configuration" below — v3 is recommended)
 
 # 3a. CTD:  raw .rsk   -> L1 (convert) -> L2 (gridded upcasts) -> L3 (regular depth-time grid)
@@ -141,9 +141,10 @@ ascent). Only **upcasts** are gridded — the CTD sits on top of the vehicle and
 during descent, so downcasts are contaminated; up/down agreement is never used as a metric.
 
 **L1 — full-resolution conversion.** `build_L1` reads the raw `.rsk` (SQLite) and writes the
-full-rate time series in physical units at whatever rate the instrument recorded (`sampling_hz`;
-2 Hz for the reference deployment, arbitrary in general). Measured channels are **discovered
-from the instrument metadata tables**, not hard-coded, so auxiliary sensors (backscatter,
+full-rate time series in physical units at whatever rate the instrument recorded. The sampling
+rate is **read from the record** (median sample interval — the RBR logs at a steady rate), so it is
+not a config item; L2 records the value used and its source in the attributes. Measured channels
+are **discovered from the instrument metadata tables**, not hard-coded, so auxiliary sensors (backscatter,
 fluorescence, dissolved oxygen, PAR, …) carry through automatically. Every sample is tagged with
 `cast_number`, `profile_number`, `cast_direction`. Conductivity is stored raw at L1.
 
@@ -193,7 +194,9 @@ two `(depth, cast)` L2 products: **velocity** (motion-corrected ENU currents and
 from the four slant beams) and **turbulence** (spectral and structure-function dissipation ε from
 the fifth, high-resolution beam). This chain is a Python port of a MATLAB toolbox
 ([`modscripps/wirewalker`](https://github.com/modscripps/wirewalker); Zheng, Lucas, Le Boyer,
-Northcott, Griffin). Improvements introduced *during the port* are marked **★**.
+Northcott, Griffin), implementing the Wirewalker ADCP velocity method of Zheng et al. (2021) and the
+fifth-beam turbulence method behind Northcott et al. (see [References](#references)). Improvements
+introduced *during the port* are marked **★**.
 
 ### Ingest and streaming
 
@@ -333,7 +336,6 @@ CTD and ADCP sections above name each key at its point of use.
   "latitude": 0.0,
   "longitude": 0.0,
   "atmospheric_pressure_dbar": 10.1325,
-  "sampling_hz": 2.0,
   "thermal_mass": { "alpha": 0.04, "beta_per_s": 0.1, "gamma": 1.0 },
   "grid": {
     "l2_dz_m": 0.5, "zmin_m": 0.0, "zmax_m": 500.0,
@@ -386,9 +388,37 @@ toolbox, not introduced during the port.
 
 ---
 
+## Known issues and limitations
+
+- **Salinity spiking (CTD) is not resolved.** Sharp thermal gradients still produce salinity
+  spikes from imperfect conductivity–temperature response matching. L2 applies the Lueck & Picklo
+  thermal-mass correction and the measured (≈ 0 s) C–T lag, but performs **no** dedicated de-spiking
+  or adaptive C–T alignment — so spikes persist through the interfaces where they are worst, and
+  bin-averaging only partially smooths them. Treat near-interface salinity and σ₀ (and anything
+  derived from them, e.g. N²) with caution. Improving this is open work.
+- **Turbulence is fifth-beam (HR) only.** ε is estimated solely from the pulse-coherent vertical
+  fifth beam (spectral + structure-function). The **four-beam HR mode is not implemented**, so there
+  is no slant-beam dissipation estimate or independent cross-check, and no ε is produced when the
+  fifth beam is absent, saturated, or below the correlation threshold.
+
+---
+
 ## References
 
+*Wirewalker instrument*
+
+- Rainville, L. & Pinkel, R. (2001). Wirewalker: An autonomous wave-powered vertical profiler. *J. Atmos. Oceanic Technol.*, 18, 1048–1051. `doi:10.1175/1520-0426(2001)018<1048:WAAWPV>2.0.CO;2`
+- Pinkel, R., Goldin, M. A., Sun, O. M., Aja, A. A., Bui, M. N. & Hughen, T. (2011). The Wirewalker: A vertically profiling instrument carrier powered by ocean waves. *J. Atmos. Oceanic Technol.*, 28, 426–446. [`doi:10.1175/2010JTECHO805.1`](https://doi.org/10.1175/2010JTECHO805.1).
+- Lucas, A. J., Pinkel, R. & Alford, M. (2017). Ocean wave energy for long endurance, broad bandwidth ocean monitoring. *Oceanography*, 30. [`doi:10.5670/oceanog.2017.232`](https://doi.org/10.5670/oceanog.2017.232).
+
+*Velocity and turbulence on the Wirewalker*
+
+- Zheng, B., Lucas, A. J., Pinkel, R. & Le Boyer, A. (2021). Fine-scale velocity measurement on the Wirewalker wave-powered profiler. *J. Atmos. Oceanic Technol.*, 38. [`doi:10.1175/JTECH-D-21-0048.1`](https://doi.org/10.1175/JTECH-D-21-0048.1). *(the velocity / motion-correction method ported here.)*
+- Le Boyer, A., Alford, M. H., Couto, N., Goldin, M., Lastuka, S., Goheen, S., Nguyen, S., Lucas, A. J. & Hennon, T. D. (2021). Modular, flexible, low-cost microstructure measurements: The Epsilometer. *J. Atmos. Oceanic Technol.*, 38(3), 657–668. [`doi:10.1175/JTECH-D-20-0116.1`](https://doi.org/10.1175/JTECH-D-20-0116.1).
+- Wiles, P. J. et al. (2006). A novel technique for measuring turbulent dissipation. *Geophys. Res. Lett.*, 33, L21608. *(structure-function method.)*
+- Northcott, D. et al. (2026). Wirewalker Signature1000 turbulence dataset. Dryad, [`doi:10.5061/dryad.8sf7m0d44`](https://doi.org/10.5061/dryad.8sf7m0d44). *(fifth-beam spectral ε; `ProcessSingleProfile.m` reference implementation.)*
+
+*CTD / thermodynamics*
+
 - Lueck, R. G. & Picklo, J. J. (1990). Thermal inertia of conductivity cells. *J. Atmos. Oceanic Technol.*, 7, 756–768.
-- Northcott, D. et al. (2026). Wirewalker Signature1000 turbulence dataset. Dryad, [`doi:10.5061/dryad.8sf7m0d44`](https://doi.org/10.5061/dryad.8sf7m0d44).
 - McDougall, T. J. & Barker, P. M. (2011). *Getting started with TEOS-10 and the GSW Oceanographic Toolbox.*
-- Wiles, P. J. et al. (2006). A novel technique for measuring turbulent dissipation. *Geophys. Res. Lett.*, 33, L21608.

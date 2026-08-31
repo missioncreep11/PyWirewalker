@@ -162,6 +162,16 @@ def build_L2(cfg, max_casts: int | None = None):
                   for v in extra_vars}
     l1.close()
 
+    # Sampling rate for the thermal-mass correction: the RBR logs at a steady rate, so
+    # take it from the record (median sample interval) rather than requiring it in the
+    # config. cfg.fs, if set, is an explicit override. (Inter-cast gaps are rare, so the
+    # median is the within-cast rate.)
+    if cfg.fs:
+        fs = float(cfg.fs)
+    else:
+        fs = 1000.0 / float(np.median(np.diff(tms_all)))
+    print(f"[L2] sampling rate {fs:.4g} Hz ({'config override' if cfg.fs else 'from record'})")
+
     # Each cast is a contiguous block of equal cast_number (L1 is time-ordered).
     bnds = np.flatnonzero(np.diff(cn_all) != 0) + 1
     starts = np.concatenate(([0], bnds))
@@ -193,7 +203,7 @@ def build_L2(cfg, max_casts: int | None = None):
         temp = temp_all[s:e]
         pres = pres_all[s:e]
         cond = correct_thermal_mass(cond_all[s:e], temp,
-                                    cfg.tm_alpha, cfg.tm_beta, cfg.tm_gamma, cfg.fs)
+                                    cfg.tm_alpha, cfg.tm_beta, cfg.tm_gamma, fs)
         der = convert(cond, temp, pres, cfg)
         depth = der["depth"]
         col = {
@@ -255,6 +265,8 @@ def build_L2(cfg, max_casts: int | None = None):
                "derived_from": cfg.l1_path.name,
                "cast_direction": "up (buoyant ascent)",
                "grid_dz_m": cfg.grid_dz, "grid_zmin_m": cfg.grid_zmin, "grid_zmax_m": cfg.grid_zmax,
+               "sampling_hz": round(fs, 4),
+               "sampling_hz_source": "config override" if cfg.fs else "derived from record",
                "thermal_mass_correction": "Lueck & Picklo (1990), RBR pyRSKtools correctTM",
                "thermal_mass_alpha": cfg.tm_alpha, "thermal_mass_beta_per_s": cfg.tm_beta,
                "thermal_mass_gamma": cfg.tm_gamma,

@@ -7,7 +7,6 @@
   "latitude": 0.0,
   "longitude": 0.0,
   "atmospheric_pressure_dbar": 10.1325,
-  "sampling_hz": 2.0,
   "thermal_mass": {
     "alpha": 0.04,
     "beta_per_s": 0.1,

@@ -32,14 +32,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mhkit import dolfyn                       # noqa: E402
 from ww_sig1000.config import AmbiguousConfigError, load_adcp_config  # noqa: E402
 from ww_sig1000.l2 import build_l2_streaming, save_l2   # noqa: E402
+from ww_sig1000.l3 import build_velocity_l3, save_l3   # noqa: E402
 from ww_sig1000.turb_product import build_turbulence_streaming, save_turbulence  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--product", default="velocity", choices=["velocity", "turbulence"],
-                    help="which product to build (default velocity)")
+    ap.add_argument("--product", default="velocity",
+                    choices=["velocity", "turbulence", "velocity-l3"],
+                    help="which product to build (default velocity). velocity-l3 grids an "
+                         "existing velocity L2 onto a regular depth-time grid")
     ap.add_argument("--config", default=None,
                     help="path to config_adcp.json (default: ./config_adcp.json or $WW_ADCP_CONFIG)")
     # every flag below overrides the corresponding config value when given
@@ -127,6 +130,27 @@ def main():
         cfg.start_time = args.start_time
     if args.end_time is not None:
         cfg.end_time = args.end_time
+
+    # velocity-l3 is derived from the velocity L2 NetCDF, not the raw .ad2cp
+    if args.product == "velocity-l3":
+        l2_in = cfg.velocity_path
+        out = Path(args.out).expanduser() if args.out else cfg.velocity_l3_path
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if not l2_in.exists():
+            ap.error(f"velocity L2 not found: {l2_in}\n"
+                     f"Build it first with: --product velocity")
+        t0 = time.time()
+        print(f"[config] {cfg.mooring or '(no mooring)'} | product=velocity-l3 | "
+              f"L2={l2_in} | out={out}", flush=True)
+        if cfg.config_path:
+            print(f"[config] loaded {cfg.config_path}", flush=True)
+        DS = build_velocity_l3(str(l2_in), l3_dz_m=cfg.l3_dz, l3_dt=cfg.l3_dt,
+                               interp_max_gap_bins=cfg.l3_interp_max_gap_bins)
+        _stamp_provenance(DS, cfg)
+        save_l3(DS, str(out))
+        print(f"[done] {DS.sizes['time']} time bins x {DS.sizes['depth']} depths "
+              f"-> {out} in {time.time()-t0:.0f}s")
+        return
 
     if not str(cfg.ad2cp_path):
         ap.error("no input file: set ad2cp_file in the config or pass --file")

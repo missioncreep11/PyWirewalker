@@ -199,7 +199,7 @@ def _structure_function_profile(vel_use, z_use, centres, *, cellsize, dep_res,
 # --------------------------------------------------------------------------- #
 def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
                             cellsize, blockdis, dep_res=3.0, max_dep=100.0,
-                            time=None, amp=None, corr_min=50, fit_min_k=0.5, min_specs=6,
+                            time=None, times=None, amp=None, corr_min=50, fit_min_k=0.5, min_specs=6,
                             spec_floor=1e-8, skip_cells=14, deep_thresh=50.0,
                             phi_deg=90.0, azi_deg=0.0, structure_function=True):
     """Spectral eps for one HR beam-5 upcast (port of ProcessSingleProfile.m).
@@ -211,7 +211,10 @@ def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
         bins 0.75..99.75, matching NortekTurbulenceData.nc).
 
     Returns dict with (nbin,) arrays eps, N, SNR, A, corr, num and (nbin, nk) spec,
-    plus z (bin centres), k (ks), time. None if the stagnation cutoff fails.
+    plus z (bin centres), k (ks), a per-bin ``time`` (nbin, datetime64; from the
+    per-ping ``times``, so it varies with depth on a slanted upcast) and a scalar
+    ``cast_time``. None if the stagnation cutoff fails. Pass ``times`` (per-ping,
+    aligned to ``vel``); the scalar ``time`` is a fallback for single-profile use.
     """
     vel = np.array(vel, float)
     corr = np.asarray(corr)
@@ -264,10 +267,18 @@ def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
     spec_out = np.full((nb, nk), np.nan)
     fit_cut = int(np.flatnonzero(ks < fit_min_k)[-1] + 1) if np.any(ks < fit_min_k) else 1
 
+    # per-bin mean sample time (ms since epoch): mean over the pings that feed each
+    # bin, so time varies with depth (a buoyant upcast is slanted in time).
+    btime_ms = np.full(nb, np.nan)
+    ptimes_ms = (np.asarray(times).astype("datetime64[ms]").view("int64").astype(float)
+                 if times is not None else None)
+
     # 9. spectral eps per depth bin
     for i, zc in enumerate(centres):
         dep_mask = (z_use >= zc - win / 2) & (z_use < zc + win / 2)   # (npings, ncols)
         prof = np.flatnonzero(dep_mask.sum(axis=1) > 4)
+        if ptimes_ms is not None and prof.size:
+            btime_ms[i] = ptimes_ms[prof].mean()
         if prof.size == 0:
             continue
         specs = np.full((nk, prof.size), np.nan)
@@ -313,5 +324,12 @@ def process_cast_turbulence(vel, corr, pressure, pitch, roll, v_a, *,
     out["spec"] = spec_out
     out["z"] = centres
     out["k"] = ks
-    out["time"] = np.datetime64(time, "ns") if time is not None else np.datetime64("NaT")
+    if times is not None:
+        arr = np.asarray(times)
+        out["time"] = btime_ms.astype("datetime64[ms]").astype("datetime64[ns]")   # (nb,)
+        out["cast_time"] = np.datetime64(arr[arr.size // 2], "ns")
+    else:                                       # scalar fallback (single-profile callers)
+        ct = np.datetime64(time, "ns") if time is not None else np.datetime64("NaT")
+        out["time"] = np.full(nb, ct)
+        out["cast_time"] = ct
     return out

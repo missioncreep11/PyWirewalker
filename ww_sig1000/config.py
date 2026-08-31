@@ -54,6 +54,10 @@ class AdcpConfig:
     motion: str = "v1"                         # v1, v2 (legacy) | v3 (l2.MOTION_VERSIONS)
     sail: bool = True                          # v3 along-wire sail term (off for a large fixed mount tilt)
     bin_average: str = "boxcar"                # boxcar | notch (l2.BIN_AVERAGE_MODES)
+    # --- velocity L3 (regular depth-time grid; derived from the velocity L2) ---
+    l3_dz_m: Optional[float] = None            # L3 depth-bin size (m); None -> boxsize_m
+    l3_dt: str = "15min"                       # L3 time-bin width (pandas offset)
+    l3_interp_max_gap_bins: int = 1            # gap-fill whole-empty time bins up to this run length
     # --- turbulence product ---
     dep_res_m: float = 3.0
     max_dep_m: float = 100.0
@@ -68,8 +72,21 @@ class AdcpConfig:
     def turbulence_path(self) -> Path:
         return self.output_dir / f"{self.basename}_turb_dep{self.dep_res_m:g}m.nc"
 
+    @property
+    def l3_dz(self) -> float:
+        """Effective L3 depth-bin size (m): `l3_dz_m`, or the L2 boxsize if unset."""
+        return self.l3_dz_m if self.l3_dz_m else self.boxsize_m
+
+    @property
+    def velocity_l3_path(self) -> Path:
+        return self.output_dir / f"{self.basename}_L3_grid{self.l3_dz:g}m_{self.l3_dt}.nc"
+
     def out_path(self, product: str) -> Path:
-        return self.turbulence_path if product == "turbulence" else self.velocity_path
+        if product == "turbulence":
+            return self.turbulence_path
+        if product == "velocity-l3":
+            return self.velocity_l3_path
+        return self.velocity_path
 
     def resolve_trim(self) -> tuple[int, Optional[int]]:
         """The (start, stop) ensemble range to process.
@@ -211,6 +228,9 @@ def load_adcp_config(path=None, assume_yes: bool = False) -> AdcpConfig:
         motion=vel.get("motion", "v1"),
         sail=vel.get("sail", True),
         bin_average=vel.get("bin_average", "boxcar"),
+        l3_dz_m=vel.get("l3_dz_m"),
+        l3_dt=vel.get("l3_dt", "15min"),
+        l3_interp_max_gap_bins=vel.get("l3_interp_max_gap_bins", 1),
         dep_res_m=turb.get("dep_res_m", 3.0),
         max_dep_m=turb.get("max_dep_m", 100.0),
         config_path=p,

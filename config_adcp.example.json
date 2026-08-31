@@ -12,7 +12,10 @@
     "motion_correct": true,
     "motion": "v3",
     "attitude": "reconstructed",
-    "sail": true
+    "sail": true,
+    "l3_dz_m": 2.0,
+    "l3_dt": "15min",
+    "l3_interp_max_gap_bins": 1
   },
   "turbulence": {
     "dep_res_m": 3.0,

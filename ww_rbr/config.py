@@ -28,7 +28,7 @@ class Config:
     lat: float = 0.0
     lon: float = 0.0
     atm_dbar: float = 10.1325
-    fs: float = 2.0
+    fs: float | None = None      # sampling rate (Hz); None -> derived from the .rsk record
     tm_alpha: float = 0.04
     tm_beta: float = 0.1
     tm_gamma: float = 1.0
@@ -163,7 +163,8 @@ def load_config(path=None, assume_yes: bool = False) -> Config:
         instrument=cfg.get("instrument", ""),
         lat=cfg["latitude"], lon=cfg["longitude"],
         atm_dbar=cfg["atmospheric_pressure_dbar"],
-        fs=cfg.get("sampling_hz", 2.0),
+        fs=cfg.get("sampling_hz"),      # optional; derived from the record when absent
+
         tm_alpha=tm.get("alpha", 0.04),
         tm_beta=tm.get("beta_per_s", 0.1),
         tm_gamma=tm.get("gamma", 1.0),
