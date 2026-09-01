@@ -303,8 +303,7 @@ correction. Each velocity and shear bin carries a Doppler-noise standard error (
 ### Turbulence — spectral method (HR beam 5)
 
 ε is estimated from the pulse-coherent vertical fifth beam. Per cast: mask low-correlation
-samples (`corr_min`); angular-demean/unwrap the wrapped velocity; subtract the deep **stagnation
-profile**; de-spike and detrend; form band-averaged vertical-wavenumber spectra over depth bins
+samples (`corr_min`); angular-demean/unwrap the wrapped velocity; remove bins close to the instrument that sit in the stagnation zone; de-spike and detrend; form band-averaged vertical-wavenumber spectra over depth bins
 (`dep_res_m`, `max_dep_m`) and fit the Kolmogorov model
 
 $$S(k) = N + A \cdot k^{-5/3}, \qquad \varepsilon = (A/C_K)^{3/2}, \quad C_K = 0.53,$$
@@ -312,11 +311,10 @@ $$S(k) = N + A \cdot k^{-5/3}, \qquad \varepsilon = (A/C_K)^{3/2}, \quad C_K = 0
 with $N$ the white noise floor and $A$ the inertial-subrange amplitude.
 
 **★ Correct reference implementation.** The vendored `WWturb_upward.m` had diverged from the
-published method and produced a systematic **+0.28 dex** high bias. The port reproduces
+published method and produced a systematic high bias relative to the Northcott et al. paper. The code here reproduces
 `ProcessSingleProfile.m` — the final paper code from Northcott et al.
 ([`doi:10.5061/dryad.8sf7m0d44`](https://doi.org/10.5061/dryad.8sf7m0d44)) — restoring
-band-averaged spectra, the data-dependent wavenumber grid, the stagnation subtraction (absent in
-the vendored code), the cutoff-nearest-1 m rule, and removal of an extraneous mask.
+band-averaged spectra, the data-dependent wavenumber grid, the stagnation subtraction, the cutoff-nearest-1 m rule, and removal of an extraneous mask.
 
 **Validation.** Against the published `NortekTurbulenceData.nc` for the full TLC 2023 deployment
 (2116 profiles × 67 depths @ 3 m), the ported spectral ε matches to **median offset −0.00 dex,
@@ -324,8 +322,8 @@ RMS ≈ 0.08 dex, corr(log ε) = 0.994**, with exactly the published profile cou
 
 ### Turbulence — structure-function method
 
-**★ A second, gap-robust estimator.** The port ports the structure-function branch of
-`WWturb_upward.m` (present but unused in the original) into a parallel estimate from the same
+The port also manitains ports the structure-function branch of
+`WWturb_upward.m` into a parallel estimate from the same
 preprocessed velocity, accumulating
 
 $$D(r) = N + A \cdot r^{2/3}, \qquad \varepsilon = (A/C_{SF})^{3/2},$$
@@ -333,26 +331,20 @@ $$D(r) = N + A \cdot r^{2/3}, \qquad \varepsilon = (A/C_{SF})^{3/2},$$
 over valid sample pairs only. $C_{SF} = 1.476$ is cross-calibrated to the validated spectral ε on
 the high-scattering TLC deployment (literature value ≈ 2.0), so `epsilon` and `epsilon_sf` share
 one absolute scale. Its value is specific to **low-scattering water**: the spectral method
-zero-fills correlation-masked samples before the FFT (negligible at TLC, ~8 % masked; significant
-at NOPP, ~30–45 % masked, where it inflates the apparent noise floor), whereas the structure
+zero-fills correlation-masked samples before the FFT, whereas the structure
 function skips gaps rather than filling them.
 
 ### ★ Quality framework and diagnostics
 
 The port adds quantitative quality measures absent from the original toolbox:
 
-- **ε–noise-floor coupling.** Real turbulence varies independently of the instrument noise floor,
+- **A note on ε–noise-floor coupling.** Real turbulence varies independently of the instrument noise floor,
   so `r(log ε, log N)` is a contamination diagnostic. On validated (high-scattering) TLC it is
-  ≈ −0.3 (the intrinsic fit trade-off) with no diel structure; on low-scattering NOPP it rises to
+  ≈ −0.3 with no diel structure; on low-scattering open ocean waters it can rise to
   +0.6…+0.9 with depth, with a near-surface diel ε cycle locked to `N` (r ≈ 0.95) — a biological
   (diel-vertical-migration) contamination. The structure-function estimator removes the gap-driven
   component in mid-water, extending the trustworthy range.
-- **Transfer-function shear noise floor.** A flat SEM-derived floor is the *wrong shape* for
-  beam-differenced shear: differencing plus the box-average shape the noise as
-  $|H(m)|^2 \propto \sin^2(2\pi m c_z)\mathrm{sinc}^2(mL)$, which rises as $m^2$ at low
-  wavenumber (differencing removes the mean). Against this floor the shear is signal-dominated to
-  ≈ 6 m vertical scales, not the ≈ 50 m a flat floor implies. Rotary (CW/CCW) spectra of the
-  complex shear resolve the up- and down-propagating internal-wave field.
+
 
 ### ★ Software engineering
 
@@ -363,6 +355,22 @@ The port adds quantitative quality measures absent from the original toolbox:
 - **Crash-safe output** — products are written to a temp file and atomically renamed, so a failed
   or interrupted write never truncates an existing product and succeeds even while a reader (e.g.
   an open notebook) holds the old file.
+
+---
+
+## Summary of Doppler Sonar port improvements
+
+| Area | Original MATLAB toolbox | PyWirewalker port |
+|------|-------------------------|-------------------|
+| Ingest | `.mat` export + `sort_file`/`merge_signature` | Direct `.ad2cp` read via DOLfYN; bounded-memory streaming |
+| Turbulence (spectral) | `WWturb_upward.m` (+0.28 dex bias) | `ProcessSingleProfile.m` method; validated to −0.00 dex / corr 0.994 |
+| Turbulence (2nd estimator) | Present but unused | Structure-function ε in every product; gap-robust in low scattering |
+| Motion correction | Single AHRS-based model | Selectable v1/v2/v3 models; v3 has independent attitude-source (`ahrs`/`reconstructed`) and `sail` flags, robust to AHRS faults |
+| Quality control | — | ε–noise-floor coupling; transfer-function shear noise floor; rotary spectra |
+| Reproducibility | Script constants | Config-driven, unit-tested, provenance in attributes, atomic writes |
+
+Velocity, beam-differenced shear, and the sail correction were **ported** from the original
+toolbox, not introduced during the port.
 
 ---
 
@@ -506,22 +514,6 @@ little time for 7–17 % less near-surface velocity noise and is identical to `b
   "cast":       { "kind": null, "min_span_dbar": 40.0, "corr_min": 50, "chunk": 500000 }
 }
 ```
-
----
-
-## Summary of Doppler Sonar port improvements
-
-| Area | Original MATLAB toolbox | PyWirewalker port |
-|------|-------------------------|-------------------|
-| Ingest | `.mat` export + `sort_file`/`merge_signature` | Direct `.ad2cp` read via DOLfYN; bounded-memory streaming |
-| Turbulence (spectral) | `WWturb_upward.m` (+0.28 dex bias) | `ProcessSingleProfile.m` method; validated to −0.00 dex / corr 0.994 |
-| Turbulence (2nd estimator) | Present but unused | Structure-function ε in every product; gap-robust in low scattering |
-| Motion correction | Single AHRS-based model | Selectable v1/v2/v3 models; v3 has independent attitude-source (`ahrs`/`reconstructed`) and `sail` flags, robust to AHRS faults |
-| Quality control | — | ε–noise-floor coupling; transfer-function shear noise floor; rotary spectra |
-| Reproducibility | Script constants | Config-driven, unit-tested, provenance in attributes, atomic writes |
-
-Velocity, beam-differenced shear, and the sail correction were **ported** from the original
-toolbox, not introduced during the port.
 
 ---
 
