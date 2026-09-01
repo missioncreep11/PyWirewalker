@@ -74,7 +74,7 @@ A few conventions:
 **Coming from the MATLAB Wirewalker toolbox?** The workflow maps over one-to-one. The constants you
 used to edit at the top of a processing script now live in one JSON **config** per instrument, and
 each instrument has a single **driver** you run. You point the driver straight at the raw `.rsk`
-(CTD) or `.ad2cp` (ADCP) — there is **no `.mat` export and no `merge_signature` / `sort_file` step**;
+(CTD) or `.ad2cp` (Doppler Sonar) — there is **no `.mat` export and no `merge_signature` / `sort_file` step**;
 DOLfYN reads the binary directly. Output is self-describing **NetCDF** — dimensions, units, and full
 provenance live in the file attributes — not `.mat` with loose script constants.
 
@@ -82,7 +82,7 @@ provenance live in the file attributes — not `.mat` with loose script constant
 |---|---|
 | edit constants at the top of the `.m` script | edit a `config_*.json` (kept next to the deployment's data) |
 | export to `.mat`, then `merge_signature` / `sort_file` | nothing — the driver reads the raw `.rsk` / `.ad2cp` directly |
-| run the processing `.m` script | run `process_wirewalker_rbr.py` (CTD) / `process_ww_sig1000.py` (ADCP) |
+| run the processing `.m` script | run `process_wirewalker_rbr.py` (CTD) / `process_ww_sig1000.py` (Doppler Sonar) |
 | get `.mat` files + whatever the script printed | get NetCDF `L1`–`L3`, with the settings recorded in the attributes |
 
 ```bash
@@ -93,15 +93,15 @@ python -m pytest ww_rbr/tests ww_sig1000/tests -q            # sanity check
 
 # 2. configure — copy a template and edit it for your deployment (this is your "script header")
 cp config_ctd.example.json  config_ctd.json                  # CTD
-cp config_adcp.example.json config_adcp.json                 # ADCP
+cp config_adcp.example.json config_adcp.json                 # Doppler Sonar
 #    edit at minimum: the raw-file path, output_dir, basename, latitude/longitude, mooring
 #    CTD  also: atmospheric_pressure_dbar, grid sizes (sampling rate is read from the .rsk)
-#    ADCP also: velocity.motion / attitude / sail   (see "Configuration" below — v3 is recommended)
+#    Doppler Sonar also: velocity.motion / attitude / sail   (see "Configuration" below — v3 is recommended)
 
 # 3a. CTD:  raw .rsk   -> L1 (convert) -> L2 (gridded upcasts) -> L3 (regular depth-time grid)
 python process_wirewalker_rbr.py --level all                 # or --level 1 / 2 / 3
 
-# 3b. ADCP: raw .ad2cp -> (depth, cast) velocity and/or turbulence products
+# 3b. Doppler Sonar: raw .ad2cp -> (depth, cast) velocity and/or turbulence products
 python process_ww_sig1000.py --product velocity
 python process_ww_sig1000.py --product turbulence
 
@@ -134,7 +134,7 @@ it. Raw instrument files are never modified.
 
 Two design principles are common to both processing pipelines:
 
-1. **Strict tiered dependence.** `L(n)` reads only `L(n−1)` — never the raw file — so a level
+1. **Tiered dependence.** `L(n)` reads only `L(n−1)` — never the raw file — so a level
    inherits only the variables present beneath it. Provenance is explicit and reprocessing from
    source is never silent.
 2. **Configuration, not code, carries deployment specifics.** All deployment- and
@@ -143,7 +143,7 @@ Two design principles are common to both processing pipelines:
    resolved values are written into the output NetCDF attributes for provenance. Every
    deployment-specific value below is a configuration item, named in `code font` where it appears.
 
-The **`(depth, cast)`** L2 convention is shared by the CTD and ADCP: each column is one upcast,
+The **`(depth, cast)`** L2 convention is shared by the CTD and Doppler Sonar: each column is one upcast,
 each row a depth bin. This lets CTD, velocity, and turbulence products be co-registered by cast and
 depth without interpolation. Because a buoyant upcast is **slanted in time** (the vehicle samples
 the deep bins minutes before the shallow ones), the CTD L2 stores `time` — and `pressure` — as full
@@ -159,9 +159,9 @@ collapsed to a single cast time (a real bias for long casts).
 | Path | What |
 |------|------|
 | `process_wirewalker_rbr.py` | CTD driver (`--level 1/2/3/all`) |
-| `process_ww_sig1000.py` | ADCP driver (`--product velocity/turbulence`) |
+| `process_ww_sig1000.py` | Doppler Sonar driver (`--product velocity/turbulence`) |
 | `ww_rbr/` | CTD package (`config`, `rsk`, `levels`, `derive`) + tests |
-| `ww_sig1000/` | ADCP package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`, `index`) + tests |
+| `ww_sig1000/` | Doppler Sonar package (`transforms`, `geometry`, `casts`, `velocity`, `motion`, `l2`, `turbulence`, `turb_product`, `index`) + tests |
 | `ww_sig1000/validation/` | turbulence reproducibility scripts (not part of the pipeline) |
 | `config_ctd.example.json`, `config_adcp.example.json` | generic config templates — copy and edit |
 | `docs/processing_report.tex` | formal methods report |
@@ -177,28 +177,23 @@ kept local under `WW_Velocity_Processing_SWOT/`.
 ## CTD processing — RBR Concerto
 
 The CTD chain (`ww_rbr/`, driver `process_wirewalker_rbr.py`) converts a raw RBR Concerto
-`.rsk` file into an L1–L3 archive. Reference deployment: mooring **NOPP-Aleutians** (RBR
-Concerto³ S/N 213752, ~5.3 × 10⁷ scans).
+`.rsk` file into an L1–L3 archive.
 
 **Cast detection.** Profiles are detected from the **CTD pressure record itself**, not taken
 from the instrument file — a time-aware, vectorised port of the historical MATLAB
 `get_upcastRBR.m` (`ww_rbr.rsk.detect_casts`; set `cast_detection.method` to `"ruskin"` to fall
 back to the `region` / `regionCast` tables instead). It classifies every sample as rising or
 sinking from the sign of the local pressure slope, debounces the flag with a majority vote to
-remove brief flips at the turnarounds, then splits the flag into casts, dropping runs too small
-in pressure span to be real (surface dwell, telemetry stops). Everything is specified in physical
+remove false turnarounds, then splits the flag into casts, dropping runs too small
+in pressure span to be full profiles. Everything is specified in physical
 units — profiling **speed** (`min_slope_dbar_per_s`) and **time** (`slope_window_s`,
 `debounce_window_s`) — and the sampling rate is read from the record (median sample interval), so
 the same config works across instruments logging at different rates. The record's **time
-continuity is checked first**: an RBR cannot skip samples onboard, but a real-time telemetered
-file can drop data, so any interval longer than `gap_factor` × the median is treated as a drop and
+continuity is checked first**, so any interval longer than `gap_factor` × the median is treated as a drop and
 detection runs independently within each continuous segment — no analysis window ever spans a gap.
-On the TLC gold-standard deployment (11.8 M scans, 8 Hz) this recovers 2116 upcasts, matching the
-Ruskin segmentation to within 3 casts (all 2116 within 0.5 s median of a Ruskin upcast).
 
 Each profile splits into a *down cast* (slow ratcheting descent) and an *up cast* (fast buoyant
-ascent). Only **upcasts** are gridded — the CTD sits on top of the vehicle and is in its wake
-during descent, so downcasts are contaminated; up/down agreement is never used as a metric.
+ascent). Only free ascent **upcasts** are used for the L2 and L3 products.
 
 **L1 — full-resolution conversion.** `build_L1` reads the raw `.rsk` (SQLite) and writes the
 full-rate time series in physical units at whatever rate the instrument recorded. The sampling
@@ -228,17 +223,16 @@ which are stored as full 2-D fields because sampling within a cast is irregular 
 matrix whose spacing is set in the config (`l3_dz_m`, `l3_dt`; 1 m × 30 min for the reference
 deployment). Being a regular grid, `time` and `pressure` here collapse to **1-D** vectors (the
 constant-Δt axis and the ≈1-D-in-depth pressure), while the data variables are 2-D `(depth, time)`.
-Each L2 depth cell is binned by its **own** 2-D sample time (see the slant note above), so `n_casts`
+Each L2 depth cell is binned by its sample time (see the slant note above), so `n_casts`
 — the number of distinct upcasts contributing to a time bin — can exceed one even where cadence is
 sparse, and a long profile is spread across the bins it truly spans. L3 is the **continuous**
 product — that is its purpose — so whole-empty time bins are linearly interpolated across short gaps
 (≤ `l3_interp_max_gap_bins`); longer gaps stay NaN, and `n_casts == 0` marks an interpolated bin (so
 `where(n_casts > 0)` recovers the observed-only grid). The build reports how sparse the matrix was
 **before** interpolation and stores it on the product (`pre_interpolation_matrix_sparsity_percent`,
-`pre_interpolation_empty_time_bins_percent`, `matrix_sparsity_percent`, `time_coverage_percent`): on
-the TLC gold-standard (1 m × 15 min) the raw matrix is 13% empty (0.9% of time bins had no upcast),
-which the single-bin gap-fill takes to 12% empty / 100% time coverage. The squared buoyancy
-frequency is
+`pre_interpolation_empty_time_bins_percent`, `matrix_sparsity_percent`, `time_coverage_percent`). 
+
+The squared buoyancy frequency is calculated as
 
 $$N^2 = \frac{g}{\rho_0} \frac{\partial \sigma_0}{\partial z}$$
 
@@ -247,16 +241,18 @@ $$N^2 = \frac{g}{\rho_0} \frac{\partial \sigma_0}{\partial z}$$
 
 ---
 
-## ADCP processing — Nortek Signature1000
+## Doppler Sonar processing — Nortek Signature1000
 
-The ADCP chain (`ww_sig1000/`, driver `process_ww_sig1000.py`) processes the raw `.ad2cp` into
+The Doppler Sonar chain (`ww_sig1000/`, driver `process_ww_sig1000.py`) processes the raw `.ad2cp` into
 two `(depth, cast)` L2 products: **velocity** (motion-corrected ENU currents and vertical shear
 from the four slant beams) and **turbulence** (spectral and structure-function dissipation ε from
 the fifth, high-resolution beam). This chain is a Python port of a MATLAB toolbox
 ([`modscripps/wirewalker`](https://github.com/modscripps/wirewalker); Zheng, Lucas, Le Boyer,
-Northcott, Griffin), implementing the Wirewalker ADCP velocity method of Zheng et al. (2021) and the
-fifth-beam turbulence method behind Northcott et al. (see [References](#references)). Improvements
-introduced *during the port* are marked **★**.
+Northcott, Griffin), implementing the Wirewalker Doppler Sonar velocity method of Zheng et al. (2021) and the
+fifth-beam turbulence method behind Northcott et al. (see [References](#references)). 
+
+Note that at the time of puclishing, turbulence calculation on the slant beams is not supported, this will be incorporated on a future release.
+
 
 ### Ingest and streaming
 
@@ -265,8 +261,7 @@ introduced *during the port* are marked **★**.
 MHKiT/DOLfYN (`from mhkit import dolfyn`), exposing the slant-beam burst, the HR fifth-beam
 burst, the IMU/AHRS records, and the instrument geometry — eliminating the manual export step.
 
-**★ Bounded-memory streaming.** Deployment files routinely exceed 10 GB (the reference NOPP file
-is ~38 GB / 4 × 10⁷ ensembles). The driver streams the file in ensemble chunks (`chunk`),
+**★ Bounded-memory streaming.** Since the data files are often large, routinely exceeding 10 GB, the driver streams the file in ensemble chunks (`chunk`),
 detecting casts on a rolling pressure buffer and carrying boundary-spanning casts into the next
 read, so memory is bounded by chunk size. Optional bounds (`start_time`/`end_time`) trim
 deployment/recovery transit. Instrument geometry is read from the file, never configured.
@@ -293,9 +288,8 @@ direction and pressure span (`kind`, `min_span_dbar`). Three motion-correction m
 **When to turn the sail correction off.** The sail term removes the horizontal velocity the vehicle
 gains travelling *along an inclined wire*; its magnitude scales with `sin(tilt)` and its direction
 follows the vehicle heading. That is correct when the **whole mooring leans** (drawn over by
-current), but wrong when the ADCP carries a large **fixed mounting tilt** — there the vehicle still
-ascends vertically, so the sail term fabricates a spurious per-cast horizontal velocity that spins
-with the (rotating) vehicle heading and stripes the section. The **TLC** deployment, whose ADCP is
+current), but wrong when the Doppler Sonar carries a large **fixed mounting tilt** — there the vehicle is not aligned with the Doppler Sonar, so the sail term fabricates a spurious per-cast horizontal velocity that spins
+with the (rotating) vehicle heading and stripes the section. The **TLC** deployment, whose Doppler Sonar is
 bolted at a fixed **25° tilt**, is processed with `sail: false` for exactly this reason; a
 near-vertical instrument on a wire that leans under current keeps it on.
 
@@ -383,16 +377,16 @@ cp config_adcp.example.json config_adcp.json
 ```
 
 **Resolution and overrides.** The driver looks for the config via `--config`, then `$WW_CONFIG`
-(CTD) / `$WW_ADCP_CONFIG` (ADCP), then a `config_*.json` in the working directory or repo root; an
+(CTD) / `$WW_ADCP_CONFIG` (Doppler Sonar), then a `config_*.json` in the working directory or repo root; an
 ambiguous (relative) path must be confirmed. Paths can be overridden without editing the file:
-`$WW_RSK` / `$WW_AD2CP` (raw input) and `$WW_OUTPUT_DIR` (output). For the ADCP, **any CLI flag
+`$WW_RSK` / `$WW_AD2CP` (raw input) and `$WW_OUTPUT_DIR` (output). For the Doppler Sonar, **any CLI flag
 overrides the corresponding config value** (`--boxsize`, `--motion`, `--attitude`, `--start-time`,
 …). Product filenames encode the grid parameters (e.g. `_L2_grid0.5m`, `_L3_grid1m_15min`), so
 changing a grid size writes a new file rather than overwriting the old one, and the resolved
 settings are stamped into every product's NetCDF attributes.
 
 Required keys have no default (the run errors without them); everything else defaults as shown. The
-detailed behaviour behind the processing choices is in the CTD and ADCP sections above — the tables
+detailed behaviour behind the processing choices is in the CTD and Doppler Sonar sections above — the tables
 here are the exhaustive key reference.
 
 ### CTD options (`config_ctd.json`)
@@ -433,7 +427,7 @@ most time bins catch a cast, but the wider it is the more a long cast's time sla
 depth is binned by its own sample time). `zmax_m` only sets the grid extent; deeper-than-profiled
 bins are simply never populated.
 
-### ADCP options (`config_adcp.json`)
+### Doppler Sonar options (`config_adcp.json`)
 
 Instrument geometry (cell size, blanking, ambiguity velocity, sample rate) is **read from the
 `.ad2cp`**, never configured.
@@ -471,7 +465,7 @@ Instrument geometry (cell size, blanking, ambiguity velocity, sample rate) is **
 *Notes.* The velocity and turbulence products share the `cast` block but default `kind`
 differently (velocity keeps both directions; turbulence uses upcasts). Only velocity has an **L3**
 (regular depth–time grid, upcasts only, gap-filled) — there is no turbulence L3. For a mount with a
-large fixed tilt (e.g. the TLC ADCP at 25°), set `motion: "v3"`, `attitude: "ahrs"`, `sail: false`;
+large fixed tilt (e.g. the TLC Doppler Sonar at 25°), set `motion: "v3"`, `attitude: "ahrs"`, `sail: false`;
 the sail term is correct only for a leaning wire, not a fixed tilt. `bin_average: "notch"` costs a
 little time for 7–17 % less near-surface velocity noise and is identical to `boxcar` below 60 m.
 
@@ -515,7 +509,7 @@ little time for 7–17 % less near-surface velocity noise and is identical to `b
 
 ---
 
-## Summary of ADCP port improvements
+## Summary of Doppler Sonar port improvements
 
 | Area | Original MATLAB toolbox | PyWirewalker port |
 |------|-------------------------|-------------------|
