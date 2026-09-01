@@ -9,6 +9,66 @@ This README summarizes the methods and usage.
 
 ---
 
+## Getting the code
+
+The project lives on GitHub at [`missioncreep11/PyWirewalker`](https://github.com/missioncreep11/PyWirewalker).
+First install [git](https://git-scm.com/) (check with `git --version`):
+
+- **Windows** — install [Git for Windows](https://git-scm.com/download/win); it includes **Git Bash**,
+  a Unix-like shell. Run every command in this README from **Git Bash** or the **Anaconda Prompt**
+  (installed with Miniconda/Anaconda) — not `cmd.exe` — so the `bash`-style snippets work as written.
+- **macOS** — `xcode-select --install` (or `brew install git`).
+- **Linux** — your package manager, e.g. `sudo apt install git`.
+
+Then clone the repository (identical on every platform):
+
+```bash
+git clone https://github.com/missioncreep11/PyWirewalker.git
+cd PyWirewalker
+```
+
+That is everything needed to run the pipelines — continue to **Quick start** below to build the
+conda environment (Miniconda/Anaconda works the same on Windows, macOS, and Linux). Pull later
+updates with `git pull` from inside the folder. The optional [GitHub CLI](https://cli.github.com/)
+(`gh`) simplifies sign-in and pull requests on all three: `gh auth login`.
+
+> On Windows, a couple of Unix-only commands used elsewhere in this README have equivalents: in the
+> Anaconda Prompt use `copy` instead of `cp`; `ncdump` is optional (the `xarray` one-liner works
+> everywhere). In Git Bash, `cp` and the other snippets work unchanged.
+
+### Installing Python
+
+This project runs on Python via **conda**. The simplest route on any system is to install
+[Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install) (a minimal Python +
+`conda`), which the *Quick start* then uses to build the `wirewalker` environment for you.
+
+- **Windows** — the Miniconda [Windows installer](https://www.anaconda.com/docs/getting-started/miniconda/install#windows-installation) (adds the "Anaconda Prompt").
+- **macOS / Linux (Unix)** — the Miniconda [macOS](https://www.anaconda.com/docs/getting-started/miniconda/install#macos-installation) / [Linux](https://www.anaconda.com/docs/getting-started/miniconda/install#linux-installation) installer, or a system Python from [python.org/downloads](https://www.python.org/downloads/) or your package manager.
+
+### Contributing
+
+Work on a branch and merge through a pull request — never commit straight to `main`:
+
+```bash
+git checkout -b short-topic-name                    # a branch for your change
+# ... edit code ...
+python -m pytest ww_rbr/tests ww_sig1000/tests -q   # keep the tests green
+git add -p && git commit -m "Short description of the change"
+git push -u origin short-topic-name                 # then open a PR on GitHub (or: gh pr create)
+```
+
+A few conventions:
+
+- **Only source, tests, and the `*.example.json` templates are versioned.** Deployment configs,
+  data products, notebooks, and figures are gitignored (see `.gitignore`) — they stay local with
+  each deployment's data. Never `git add -f` them.
+- **Add or update a test** for any change to the numerics (`ww_rbr/tests/`, `ww_sig1000/tests/`),
+  and run the full suite before pushing.
+- Keep new processing knobs **config-driven** (not hard-coded) and document them in the
+  *Configuration* tables below.
+
+---
+
 ## Quick start
 
 **Coming from the MATLAB Wirewalker toolbox?** The workflow maps over one-to-one. The constants you
