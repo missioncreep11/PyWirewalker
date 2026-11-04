@@ -93,3 +93,68 @@ def test_profile_pairs_down_with_up():
 
 def test_empty_input():
     assert detect_casts(np.array([], np.int64), np.array([])) == []
+
+
+def _short_fast_casts(n_profiles=6, fs=16.0, top=1.4, bottom=18.5,
+                      down_speed=0.25, up_speed=1.1, turn_s=2.0):
+    """Shallow, fast Wirewalker-like record: slow wave-driven descent, ~15 s buoyant
+    ascent, and rounded (cosine) turnarounds of `turn_s` at the apex and nadir, so
+    the vehicle decelerates and reverses the way it does at sea. Returns (t_ms, P)."""
+    dt = 1.0 / fs
+    span = bottom - top
+    down = top + down_speed * np.arange(0, span / down_speed, dt)
+    up = bottom - up_speed * np.arange(0, span / up_speed, dt)
+    tt = np.arange(0, turn_s, dt)
+    nadir = bottom + 0.3 * np.sin(np.pi * tt / turn_s)   # overshoot then rise
+    apex = top - 0.3 * np.sin(np.pi * tt / turn_s)       # overshoot then sink back
+    cyc = np.concatenate([down, nadir, up, apex])
+    P = np.concatenate([cyc] * n_profiles)
+    t = (np.arange(P.size) * dt * 1000.0).astype(np.int64)
+    return t, P
+
+
+def test_short_casts_end_on_turnarounds():
+    # Regression: with the default 5 s slope / 7.5 s debounce windows a ~15 s
+    # upcast kept ~1.5 s of post-apex samples (vehicle sinking back through its
+    # wake) and pre-nadir samples (still sinking). Upcasts must now span exactly
+    # deepest -> shallowest, and be monotone in the sense that no sample is
+    # deeper than the first or shallower than the last.
+    t, P = _short_fast_casts()
+    casts = detect_casts(t, P)
+    ups = [c for c in casts if c.direction == 1]
+    assert len(ups) == 6
+    for c in ups:
+        seg = P[(t >= c.t1) & (t < c.t2)]
+        assert seg[0] >= seg.max() - 0.04            # starts at the nadir
+        assert seg[-1] <= seg.min() + 0.04           # ends at the apex
+        # nothing after the apex: the last sample is the shallowest within tol
+        i_min = np.argmin(seg)
+        assert seg.size - 1 - i_min <= 1 or np.all(seg[i_min:] <= seg.min() + 0.04)
+    # casts still tile the record without overlap
+    for a, b in zip(casts, casts[1:]):
+        assert a.t2 <= b.t1
+
+
+def test_snapping_does_not_change_long_cast_counts():
+    t, P = _sawtooth(n_profiles=5, fs=2.0, depth=400.0, speed=0.3)
+    casts = detect_casts(t, P)
+    assert sum(c.direction == 1 for c in casts) == 5
+    for c in casts:
+        if c.direction == 1:
+            seg = P[(t >= c.t1) & (t < c.t2)]
+            assert seg[0] >= 400.0 - 0.3 and seg[-1] <= 0.3
+
+
+def test_nan_pressure_does_not_crash_and_keeps_casts():
+    # Real .rsk files can hold NULL (-> NaN) pressure samples, singly or in runs;
+    # the old detector tolerated them, so the turnaround snapping must too.
+    t, P = _short_fast_casts(n_profiles=4)
+    P = P.copy()
+    P[::97] = np.nan                                  # scattered NaNs
+    P[300:340] = np.nan                               # a NaN run inside a cast
+    i_apex = int(np.nanargmin(P[:1500]))
+    P[i_apex - 5:i_apex + 5] = np.nan                 # NaNs right at a turnaround
+    casts = detect_casts(t, P)
+    assert sum(c.direction == 1 for c in casts) == 4
+    for a, b in zip(casts, casts[1:]):
+        assert a.t2 <= b.t1

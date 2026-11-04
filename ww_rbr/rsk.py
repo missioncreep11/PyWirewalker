@@ -126,13 +126,79 @@ def time_continuity(tstamp: np.ndarray, gap_factor: float = 4.0):
     return fs, dt_med, gaps
 
 
+def _snap_to_turnarounds(P, upf, starts, ends, reach, tol_dbar):
+    """Move each run boundary of the debounced flag onto the pressure turnaround.
+
+    The centred slope (half-window `half`) and the majority-vote debounce
+    (half-window `m`) both smear the up/down flag across each apex and nadir, by up
+    to ``reach = half + m`` samples. Left alone, a cast keeps the samples where the
+    vehicle has already reversed: at the apex the upcast runs on while the vehicle
+    sinks back through its own wake (warm/salty spikes in the shallowest L2 bins),
+    and at the nadir it starts while the vehicle is still sinking. The shorter the
+    cast, the larger that fraction (a 15 s upcast at 16 Hz lost ~1.5 s at each end).
+
+    Each down->up boundary is moved to the *last* sample within `tol_dbar` of the
+    local pressure maximum (the upcast starts when the vehicle leaves the bottom);
+    each up->down boundary to the sample just after the *first* sample within
+    `tol_dbar` of the local pressure minimum (the upcast ends on arrival at the
+    apex; a surface dwell goes to the following downcast). The search is limited
+    to +/- `reach` samples and to the inner halves of the two adjacent runs, so
+    boundaries stay ordered and the casts still tile the segment.
+
+    The two outer edges of the segment (record start/end, or either side of a data
+    drop) are trimmed by the same rule within their first/last `reach` samples, so
+    a cast cut off by the segment edge also stops at its turnaround; the trimmed
+    samples belong to no cast.
+    """
+    n = P.size
+    s0, e1 = int(starts[0]), int(ends[-1])
+
+    def near(w, deep):
+        """Indices of finite samples in `w` within tol of its max (deep) or min."""
+        f = np.isfinite(w)
+        if not f.any():
+            return np.array([], int)               # all-NaN window: leave boundary alone
+        ref = np.max(w[f]) if deep else np.min(w[f])
+        return np.flatnonzero(f & ((w >= ref - tol_dbar) if deep else (w <= ref + tol_dbar)))
+
+    # outer edges: first run starts leaving its turnaround, last run ends arriving
+    w = P[: min(reach + 1, (ends[0] + 1) // 2 + 1)]
+    i = near(w, deep=upf[0] == 1)
+    if i.size:
+        s0 = int(i[-1])
+    lo = max(n - reach - 1, (starts[-1] + n) // 2)
+    i = near(P[lo:], deep=upf[-1] != 1)
+    if i.size:
+        e1 = lo + int(i[0]) + 1
+    if len(starts) < 2:
+        return np.array([s0]), np.array([max(e1, s0)])
+    b = starts[1:].copy()                          # interior boundaries
+    lo_lim = np.concatenate(([0], b[:-1]))
+    hi_lim = np.concatenate((b[1:], [P.size]))
+    for k, bk in enumerate(b):
+        lo = max(bk - reach, (lo_lim[k] + bk) // 2)
+        hi = min(bk + reach + 1, (bk + hi_lim[k]) // 2 + 1)
+        if upf[starts[k + 1]] == 1:                # down -> up: nadir
+            i = near(P[lo:hi], deep=True)
+            if i.size:
+                b[k] = lo + i[-1]                  # upcast starts at the last deep sample
+        else:                                      # up -> down: apex
+            i = near(P[lo:hi], deep=False)
+            if i.size:
+                b[k] = lo + i[0] + 1               # upcast ends at the first shallow sample
+    b = np.clip(np.maximum.accumulate(b), s0, e1)  # guard ordering
+    return np.concatenate(([s0], b)), np.concatenate((b, [e1]))
+
+
 def _detect_casts_segment(t, P, half, m, thresh_per_sample, min_span_dbar,
-                          cn0, prof0):
+                          cn0, prof0, tol_dbar=0.04):
     """Detect casts within a single time-continuous segment (no gaps inside).
 
     Works in sample space at the segment's steady rate: `half`/`m` are sample
-    counts and `thresh_per_sample` is dbar/sample. Returns (casts, next_cn,
-    next_prof) so the caller can number casts/profiles across segments.
+    counts and `thresh_per_sample` is dbar/sample. Cast boundaries are then snapped
+    onto the pressure turnarounds (`_snap_to_turnarounds`, tolerance `tol_dbar`).
+    Returns (casts, next_cn, next_prof) so the caller can number casts/profiles
+    across segments.
     """
     n = P.size
     slope = np.zeros(n)                            # dbar/sample; edges stay 0 (-> down)
@@ -151,13 +217,16 @@ def _detect_casts_segment(t, P, half, m, thresh_per_sample, min_span_dbar,
     chg = np.flatnonzero(np.diff(upf)) + 1
     starts = np.concatenate(([0], chg))
     ends = np.concatenate((chg, [n]))
+    dirs = upf[starts]                             # run direction, before snapping
+    starts, ends = _snap_to_turnarounds(P, upf, starts, ends, half + m, tol_dbar)
 
     casts, cn, prof = [], cn0, prof0
-    for s, e in zip(starts, ends):
+    for s, e, dirk in zip(starts, ends, dirs):
         seg = P[s:e]
-        if seg.max() - seg.min() < min_span_dbar:
+        if seg.size == 0 or not np.isfinite(seg).any() or \
+                np.nanmax(seg) - np.nanmin(seg) < min_span_dbar:
             continue                               # not a real cast
-        direction = int(upf[s])                    # 1 up, 0 down
+        direction = int(dirk)                      # 1 up, 0 down
         if direction == 0:
             prof += 1                              # a downcast opens a new profile
         casts.append(Cast(cast_number=cn, profile_number=max(prof, 0),
@@ -195,6 +264,11 @@ def detect_casts(tstamp: np.ndarray, pressure: np.ndarray, fs: float | None = No
       this end-to-end difference.)
     - **Debounce.** Majority vote over a centred ``+/- debounce_window_s`` window,
       removing brief flips at the apex/nadir turnarounds and from noise.
+    - **Snap to turnarounds.** The slope and debounce windows smear the flag up to
+      ``half + m`` samples past each apex/nadir, so every run boundary is moved
+      onto the local pressure extremum (within ``tol_dbar`` = 0.04 dbar): an upcast
+      runs from the last deep sample to the first shallow one and never includes
+      the vehicle sinking back through its own wake. See `_snap_to_turnarounds`.
     - **Segment.** Each maximal run of the debounced flag is one cast; runs whose
       pressure span is under ``min_span_dbar`` (surface dwell, telemetry stops)
       are dropped, not emitted.
