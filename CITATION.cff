@@ -13,6 +13,17 @@ authors:
     email: ajlucas@ucsd.edu
     affiliation: "Scripps Institution of Oceanography, University of California San Diego"
     orcid: "https://orcid.org/0000-0001-7722-7252"
+  - family-names: Le Boyer
+    given-names: Arnaud
+    affiliation: "Scripps Institution of Oceanography, University of California San Diego"
+  - family-names: Zheng
+    given-names: Bofu
+  - family-names: Northcott
+    given-names: Devon
+    affiliation: "Scripps Institution of Oceanography, University of California San Diego"
+  - family-names: Griffin
+    given-names: Caeli
+    affiliation: "Scripps Institution of Oceanography, University of California San Diego"
 repository-code: "https://github.com/missioncreep11/PyWirewalker"
 license: MIT
 version: 1.0.0
