@@ -1,0 +1,63 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below, and cite the method papers listed under references."
+type: software
+title: "PyWirewalker: Python processing for Wirewalker CTD and Doppler sonar data"
+abstract: >-
+  Processing pipelines for RBR CTD loggers and Nortek Signature Doppler sonars carried on the
+  wave-powered Wirewalker profiler. Raw instrument files are converted through a staged L0-L3
+  archive of self-describing NetCDF products, including motion-corrected velocity and shear, and
+  turbulent kinetic energy dissipation from the high-resolution vertical beam.
+authors:
+  - family-names: Lucas
+    given-names: Andrew J.
+    email: ajlucas@ucsd.edu
+    affiliation: "Scripps Institution of Oceanography, University of California San Diego"
+    orcid: "https://orcid.org/0000-0001-7722-7252"
+repository-code: "https://github.com/missioncreep11/PyWirewalker"
+license: MIT
+version: 1.0.0
+date-released: "2026-11-04"
+keywords:
+  - oceanography
+  - Wirewalker
+  - Doppler sonar
+  - ADCP
+  - turbulence
+  - CTD
+references:
+  - type: article
+    title: "Finescale velocity measurement on the Wirewalker wave-powered profiler"
+    authors:
+      - family-names: Zheng
+        given-names: Bofu
+      - family-names: Lucas
+        given-names: Andrew J.
+      - family-names: Pinkel
+        given-names: Robert
+      - family-names: Le Boyer
+        given-names: Arnaud
+    journal: "Journal of Atmospheric and Oceanic Technology"
+    volume: 39
+    start: 133
+    end: 147
+    year: 2022
+    doi: "10.1175/JTECH-D-21-0048.1"
+  - type: article
+    title: "Observations of the internal wave to turbulence cascade"
+    authors:
+      - family-names: Northcott
+        given-names: Devon
+      - family-names: Le Boyer
+        given-names: Arnaud
+      - family-names: MacKinnon
+        given-names: Jennifer
+      - family-names: Alford
+        given-names: Matthew H.
+      - family-names: Lucas
+        given-names: Andrew J.
+    journal: "Journal of Physical Oceanography"
+    volume: 56
+    start: 839
+    end: 853
+    year: 2026
+    doi: "10.1175/JPO-D-25-0114.1"
