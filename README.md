@@ -1,5 +1,7 @@
 # PyWirewalker
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23965415.svg)](https://doi.org/10.5281/zenodo.23965415)
+
 Processing pipelines for the RBR family loggers and Nortek family Doppler Sonars carried onboard the
 [Wirewalker](https://www.delmarocean.com/) profiler. Raw instrument files are converted through a staged
 L0–L3 archive of self-describing NetCDF products; every derived quantity is reproducible from
