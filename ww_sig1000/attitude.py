@@ -85,7 +85,9 @@ def highfreq_fraction(accel, fs, cutoff_hz=DEFAULT_CUTOFF_HZ) -> float:
     lp = gravity_direction(a, fs, cutoff_hz)
     v_hi = np.var(raw - lp, axis=1).sum()
     v_all = np.var(raw, axis=1).sum()
-    return float(v_hi / v_all) if v_all > 0 else np.nan
+    if not np.isfinite(v_all):
+        return np.nan                      # catch bad input
+    return float(v_hi / v_all) if v_all > 1e-12 else 0.0 # avoid dividing by rounding error 
 
 
 @dataclass

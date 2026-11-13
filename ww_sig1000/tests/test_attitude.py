@@ -137,6 +137,13 @@ def test_highfreq_fraction_detects_real_attitude_change_above_the_cutoff():
     f_swing = highfreq_fraction(swinging["accel"].values, FS)
     assert f_swing > f_steady * 5
 
+def test_highfreq_fraction_handles_constant_and_bad_input():
+    acc = _ds(3.0, -2.0)["accel"].values
+    assert highfreq_fraction(acc, FS) == 0.0           # no motion -> nothing discarded
+    bad = acc.copy()
+    bad[0, 100] = np.nan
+    assert np.isnan(highfreq_fraction(bad, FS))        # bad input is flagged, not hidden
+
 
 # --------------------------------------------------------------------------- #
 # harness
